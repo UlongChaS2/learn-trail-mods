@@ -148,24 +148,42 @@ export const register: Register = on => {
     return { text: `패널 열기 실패 — ${String(next.error?.message ?? next.error)}` }
   })
 
+  /**
+   * 저장해 둔 본문을 대화에 다시 띄운다.
+   *
+   * <p>훅 안에서 직접 try 로 감싼다. 바깥 {@code .catch} 는 훅이 "던졌을" 때만 불리는데,
+   * 응답이 아예 안 돌아오면(시간 초과) 엔진은 "아무도 답하지 않았다"고만 말하고 끝난다 —
+   * 2026-10-08 에 그 상태로 한참 헤맸다. 어디까지 갔는지를 글로 돌려줘야 알 수 있다.
+   *
+   * <p>상태 읽기에 2초 상한을 둔다. 읽기가 안 돌아와도 적어도 "읽다가 멈췄다"는 말은 나온다.
+   */
   on('command.run', { command: 'trail-recall' }, async $ => {
-    const t = await read($, trail)
-    if (t.cursor < 0 || t.cursor >= t.items.length) {
-      return { text: '되감을 항목이 없습니다.' }
+    let stage = '시작'
+    try {
+      stage = '상태 읽기'
+      const t = await Promise.race([
+        read($, trail),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('2초 안에 안 돌아옴')), 2000)),
+      ])
+
+      stage = '항목 고르기'
+      if (!t || !Array.isArray(t.items) || t.items.length === 0) {
+        return { text: '목차가 비어 있습니다. 설명을 먼저 들어야 되감을 것이 생깁니다.' }
+      }
+      const i = t.cursor >= 0 && t.cursor < t.items.length ? t.cursor : 0
+
+      stage = '본문 꺼내기'
+      const saved = t.notes?.[String(i)]
+      const head = `${i + 1}. ${t.items[i]}`
+      return {
+        text: saved
+          ? `${head}\n\n${saved}`
+          : `${head}\n\n(이 항목은 아직 설명이 저장되지 않았습니다.)`,
+      }
+    } catch (err) {
+      return { text: `되감기가 "${stage}" 에서 멈췄습니다 — ${String(err)}` }
     }
-    const saved = t.notes[String(t.cursor)]
-    const head = `${t.cursor + 1}. ${t.items[t.cursor]}`
-    // 저장해 둔 설명을 토씨 그대로 돌려준다. 없으면 아직 설명 전이라는 뜻이다
-    return {
-      text: saved
-        ? `${head}\n\n${saved}`
-        : `${head}\n\n(아직 이 항목을 설명하지 않았습니다.)`,
-    }
-  }).catch(($, e, next) => {
-    // 이 훅은 next 를 부르지 않고 스스로 답한다. 터지면 엔진이 "아무도 답하지 않았다"고만
-    // 말하고 이유는 사라진다 — 실제로 그래서 한참 헤맸다. 이유를 글로 돌려준다
-    if (next.called) return next(e)
-    return { text: `되감기 실패 — ${String(next.error?.stack ?? next.error ?? '알 수 없음')}` }
   })
 
   on('tool.call', { tool: 'mcp__learn-trail__trail' }, async ($, e) => {

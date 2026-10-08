@@ -9,6 +9,21 @@ const EMPTY: Trail = { title: '', items: [], cursor: -1, done: [], notes: {}, br
 
 const trail = atom({ plugin: 'learn-trail', key: 'trail' } as const, EMPTY)
 
+/**
+ * 세션을 넘겨 남기는 자리.
+ *
+ * atom 은 $.state 에 얹히는데 그건 <b>세션 단위</b>다 — 창을 닫으면 사라진다.
+ * 이 mod 의 쓸모가 "나중에 다시 보기" 라서 그걸로는 반쪽이다(2026-10-08 실제로 날렸다).
+ * 그래서 쓸 때마다 $.store 에도 같이 넣고, 기동할 때 거기서 되읽는다.
+ */
+const STORE_KEY = 'trail'
+
+/** state 와 store 양쪽에 쓴다. store 가 실패해도 화면은 돌아가야 한다 */
+const save = async ($: Parameters<typeof read>[0], next: Trail) => {
+  await update($, trail, () => next)
+  await $.store.set(STORE_KEY, next).catch(() => {})
+}
+
 /** 목차를 새로 깔면 진행 상태는 전부 초기화된다 — 반쯤 남은 표시가 섞이면 더 헷갈린다 */
 const startTrail = (title: string, items: string[]): Trail => ({
   title,
@@ -74,6 +89,16 @@ export const register: Register = on => {
       },
     })
 
+    // 지난 세션에서 쌓아 둔 것을 되살린다
+    try {
+      const saved = (await $.store.get(STORE_KEY)) as Trail | undefined
+      if (saved && Array.isArray(saved.items)) {
+        await update($, trail, () => saved)
+      }
+    } catch {
+      // 복원 실패는 조용히 넘긴다 — 빈 목차로 시작하면 된다
+    }
+
     return next(e)
   })
 
@@ -114,7 +139,8 @@ export const register: Register = on => {
     // 상태 갱신이 실패해도 호출 자체는 성공으로 돌려준다.
     // 패널이 안 그려지는 것보다 설명이 끊기는 게 나쁘다
     try {
-      await update($, trail, (t: Trail) => {
+      const before = await read($, trail)
+      const after = ((t: Trail) => {
         switch (input.action) {
           case 'set': {
             const items = input.items ?? []
@@ -164,7 +190,8 @@ export const register: Register = on => {
             return t
           }
         }
-      })
+      })(before)
+      await save($, after)
     } catch (err) {
       line = `패널 갱신 실패 — ${String(err)}`
     }
@@ -177,6 +204,13 @@ export const register: Register = on => {
 
     // result 는 문자열·배열만 받는다. 객체를 돌려주면 호출이 통째로 거부된다
     return { result: line, text: line }
+  }).catch(($, e, next) => {
+    // 이 훅은 호출을 스스로 답한다(next 를 부르지 않는다). 훅이 터지면 엔진이 그 자리를
+    // 대신 메우는데, 그때 "패널이 됐다"고 오해할 답이 가면 안 된다 — 안 됐다고 말한다.
+    // 설명은 계속돼야 하므로 거부가 아니라 성공으로, 사유만 실어 돌려준다
+    if (next.called) return next(e)
+    const why = `패널 갱신 실패 — ${String(next.error?.message ?? next.error ?? '알 수 없음')}`
+    return { result: why, text: why }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -212,7 +246,8 @@ export const register: Register = on => {
                 dimColor={isDone && !isNow}
                 label={`${mark} ${item}${isNow ? '   ← 지금' : !isNow && note ? '  ●' : ''}`}
                 onPress={async () => {
-                  await update($, trail, (t2: Trail) => ({ ...t2, cursor: i }))
+                  const cur = await read($, trail)
+                  await save($, { ...cur, cursor: i })
                   // 패널은 좁다. 설명 본문은 대화로 돌려준다
                   await $.command.run({ command: 'trail-recall' }).catch(() => {})
                 }}

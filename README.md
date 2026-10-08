@@ -49,9 +49,23 @@ MonitorEx — Vertica 붙이기
 ## 개발
 
 ```bash
-claude --plugin-dir /path/to/learn-trail     # 이 세션에만 올린다
-claude plugin validate /path/to/learn-trail  # 엔진이 뭘 거부할지 미리 본다
-claude plugin test /path/to/learn-trail      # 테스트
+claude --plugin-dir /path/to/learn-trail/plugin     # 이 세션에만 올린다
+claude plugin validate /path/to/learn-trail/plugin  # 엔진이 뭘 거부할지 미리 본다
+claude plugin test /path/to/learn-trail/plugin      # 테스트
+```
+
+**경로는 `plugin/` 까지다.** 레포 뿌리에는 마켓플레이스 파일(`.claude-plugin/marketplace.json`)이
+있고, 뿌리를 그대로 가리키면 엔진이 그 폴더를 <b>마켓플레이스로</b> 읽어 플러그인이 안 올라온다 —
+명령이 `Unknown command` 로 나온다. 그래서 둘을 층으로 갈라 뒀다.
+
+```
+learn-trail/                      레포 = 마켓플레이스
+├── .claude-plugin/
+│   └── marketplace.json          → "source": "./plugin"
+└── plugin/                       ← 플러그인은 여기
+    ├── .claude-plugin/plugin.json
+    ├── hooks/
+    └── types/
 ```
 
 고친 내용은 세션을 다시 시작해야 반영된다(개발용 `dev-mods` 폴더에 두면 저장 즉시 반영).

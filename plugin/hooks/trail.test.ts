@@ -66,7 +66,7 @@ test('note 로 저장한 본문이 되감기에서 그대로 나온다', async $
   const body = '연결 하나를 새로 만들려면 TCP·인증·세션 설정을 거쳐\n수십 ms 가 걸린다.'
   await $.tool.call({ tool: TOOL, action: 'note', index: 1, text: body })
 
-  const res = await $.command.run({ command: 'trail-recall' })
+  const res = await $.command.run({ command: 'r' })
 
   expect(res.text).toContain('1. 연결을 미리 만들어 두는 이유')
   expect(res.text).toContain('TCP·인증·세션')
@@ -86,9 +86,23 @@ test('되감기를 연달아 불러도 계속 답한다', async $ => {
   await $.tool.call({ tool: TOOL, action: 'note', index: 1, text: '첫째 본문' })
 
   for (let n = 0; n < 3; n++) {
-    const res = await $.command.run({ command: 'trail-recall' })
+    const res = await $.command.run({ command: 'r' })
     expect(res.text).toContain('첫째 본문')
   }
+})
+
+/** /r 2 처럼 번호를 주면 그 항목이 나온다 — 패널에 들어가지 않고 쓰는 길이다 */
+test('번호를 주면 그 항목이 나오고 지금 위치도 따라간다', async $ => {
+  await $.tool.call({ tool: TOOL, action: 'set', title: 'x', items: ['하나', '둘', '셋'] })
+  await $.tool.call({ tool: TOOL, action: 'note', index: 3, text: '셋째 본문' })
+
+  const res = await $.command.run({ command: 'r', args: '3' })
+  expect(res.text).toContain('3. 셋')
+  expect(res.text).toContain('셋째 본문')
+
+  // 번호 없이 부르면 방금 옮겨 간 자리를 보여 준다
+  const again = await $.command.run({ command: 'r' })
+  expect(again.text).toContain('셋째 본문')
 })
 
 // 패널 버튼을 눌러 보는 테스트는 넣지 못했다. 하네스에서 mount 가 이 mod 의 Pane 훅을

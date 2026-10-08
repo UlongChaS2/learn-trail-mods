@@ -67,9 +67,10 @@ export const register: Register = on => {
       name: 'trail',
       description: '학습 경로 패널을 연다 (지금 어디를 설명 중인지)',
     })
+    // 이름이 짧아야 쓴다. /r 2 로 2번 설명이 바로 뜬다
     await $.command.register({
-      name: 'trail-recall',
-      description: '지금 고른 항목의 설명을 대화에 다시 띄운다',
+      name: 'r',
+      description: '설명 다시 보기 — /r 2 처럼 번호를 준다 (번호 없으면 지금 항목)',
     })
 
     // 모델이 설명하면서 직접 부른다. 사람이 챙길 일이 없어야 한다
@@ -179,11 +180,19 @@ export const register: Register = on => {
    * 통째로 죽인다. 첫 호출만 되고 그 뒤로 전부 "아무도 답하지 않았다" 가 됐던 원인이다.
    * 안전장치가 고장의 원인이었다.
    */
-  on('command.run', { command: 'trail-recall' }, async $ => {
+  on('command.run', { command: 'r' }, async ($, e) => {
     try {
-      return { text: recallText(await read($, trail)) }
+      // "2" 처럼 번호를 주면 그 항목, 없으면 지금 항목. 사람이 보는 번호는 1부터
+      const asked = Number.parseInt((e.args ?? '').trim(), 10)
+      const at = Number.isFinite(asked) ? asked - 1 : undefined
+      const t = await read($, trail)
+      // 번호로 불렀으면 거기로 옮겨 둔다 — 패널의 "지금" 도 따라가야 혼선이 없다
+      if (at !== undefined && at >= 0 && at < t.items.length && at !== t.cursor) {
+        await save($, { ...t, cursor: at })
+      }
+      return { text: recallText(t, at) }
     } catch (err) {
-      return { text: `되감기 실패 — ${String(err)}` }
+      return { text: `다시 보기 실패 — ${String(err)}` }
     }
   })
 
@@ -338,7 +347,7 @@ export const register: Register = on => {
           )
         })}
         <Box paddingTop={1}>
-          <Text dimColor>ctrl+x tab → 숫자키 또는 Tab+Enter → 설명이 대화에 다시 뜸</Text>
+          <Text dimColor>{'/r 2  ← 2번 설명 다시 보기'}</Text>
         </Box>
         {t.branches.length > 0 && (
           <Box flexDirection="column" paddingTop={1}>

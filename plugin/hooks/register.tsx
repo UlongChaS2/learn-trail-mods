@@ -609,29 +609,41 @@ export const register: Register = on => {
           </Box>
         )}
 
+        {/* 지금 주제와 같은 모양으로 세운다 — 접힘 표시(▸)와 번호와 제목, 끝에 ✕.
+            다르게 생기면 "주석" 처럼 읽혀서 눌러도 되는 줄인지 모른다. 색만 죽인다 */}
         {others.length > 0 && (
           <Box flexDirection="column" paddingTop={1}>
-            <Text dimColor>다른 주제</Text>
             {others.map(t => (
-              <Box>
+              <Box key={`row-${t.no}`}>
                 <Button
                   key={`go-${t.no}`}
                   plain
                   dimColor
-                  label={`  ${t.no}. ${t.title} (${agoOf(t.touchedAt)})`}
+                  label={`▸ ${t.no}. ${t.title}`}
                   onPress={async () => {
                     const now = await read($, trails)
                     await save($, { ...now, current: String(t.no) })
                   }}
                 />
-                <Button key={`x-${t.no}`} plain dimColor label="  ✕" onPress={() => drop(String(t.no))} />
+                <Button
+                  key={`x-${t.no}`}
+                  plain
+                  dimColor
+                  label="  ✕"
+                  onPress={() => drop(String(t.no))}
+                />
               </Box>
             ))}
           </Box>
         )}
 
-        <Box paddingTop={1}>
-          <Text dimColor>{'/recall 1.2  ← 그 설명을 대화로   ·   ✕ 또는 /trail drop 1'}</Text>
+        {/* 쓸 수 있는 말을 상자에 모은다. 목차 줄들과 섞여 흐르면 안내인지 항목인지
+            구분이 안 된다 — 테두리가 그 경계를 긋는다 */}
+        <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1} marginTop={1}>
+          <Text dimColor>{'/recall 1.2   1번 주제 2번 설명을 대화로'}</Text>
+          <Text dimColor>{'/recall 2     지금 주제의 2번'}</Text>
+          <Text dimColor>{'/trail drop 1 1번 주제 지우기'}</Text>
+          <Text dimColor>{'ctrl+x tab    패널 안에서 숫자키로 이동'}</Text>
         </Box>
       </Box>
     )

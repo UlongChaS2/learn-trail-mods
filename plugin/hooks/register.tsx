@@ -143,6 +143,9 @@ export const register: Register = on => {
   on('command.run', { command: 'trail' }, async $ => {
     await $.ui.open({ id: PANE, title: '학습 경로' }).catch(() => {})
     return { text: '학습 경로 패널을 열었습니다.' }
+  }).catch(($, e, next) => {
+    if (next.called) return next(e)
+    return { text: `패널 열기 실패 — ${String(next.error?.message ?? next.error)}` }
   })
 
   on('command.run', { command: 'trail-recall' }, async $ => {
@@ -158,6 +161,11 @@ export const register: Register = on => {
         ? `${head}\n\n${saved}`
         : `${head}\n\n(아직 이 항목을 설명하지 않았습니다.)`,
     }
+  }).catch(($, e, next) => {
+    // 이 훅은 next 를 부르지 않고 스스로 답한다. 터지면 엔진이 "아무도 답하지 않았다"고만
+    // 말하고 이유는 사라진다 — 실제로 그래서 한참 헤맸다. 이유를 글로 돌려준다
+    if (next.called) return next(e)
+    return { text: `되감기 실패 — ${String(next.error?.stack ?? next.error ?? '알 수 없음')}` }
   })
 
   on('tool.call', { tool: 'mcp__learn-trail__trail' }, async ($, e) => {

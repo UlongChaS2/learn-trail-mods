@@ -1,64 +1,109 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { Trail } from '../types'
+import type { Trail, Trails } from '../types'
 
 const PANE = 'learn-trail'
+const STORE_KEY = 'trails'
 
-const EMPTY: Trail = { title: '', items: [], cursor: -1, done: [], notes: {}, branches: [] }
+/** 이 날수보다 오래 손 안 댄 주제는 켤 때 "지울까요" 하고 묻는다 */
+const STALE_DAYS = 7
+const DAY = 24 * 60 * 60 * 1000
 
-const trail = atom({ plugin: 'learn-trail', key: 'trail' } as const, EMPTY)
+const EMPTY: Trails = { byTopic: {}, current: '', collapsed: [], kept: [] }
 
 /**
- * 세션을 넘겨 남기는 자리.
+ * 제목에서 부르기 쉬운 이름을 뽑는다 — "Hikari 커넥션 풀" → `hikari`.
  *
- * atom 은 $.state 에 얹히는데 그건 <b>세션 단위</b>다 — 창을 닫으면 사라진다.
- * 이 mod 의 쓸모가 "나중에 다시 보기" 라서 그걸로는 반쪽이다(2026-10-08 실제로 날렸다).
- * 그래서 쓸 때마다 $.store 에도 같이 넣고, 기동할 때 거기서 되읽는다.
+ * 영문·숫자 토막이 있으면 그 첫 번째를 쓴다. 치기 쉽고 기억에 남는 쪽이 대개 거기다.
+ * 없으면(순한글 제목) 첫 낱말을 그대로 쓴다.
  */
-const STORE_KEY = 'trail'
+const slugOf = (title: string): string => {
+  const ascii = title.toLowerCase().match(/[a-z][a-z0-9]+/)
+  if (ascii) return ascii[0]
+  const word = title.trim().split(/\s+/)[0] ?? ''
+  return word.slice(0, 12) || 'topic'
+}
 
-/** state 와 store 양쪽에 쓴다. store 가 실패해도 화면은 돌아가야 한다 */
-const save = async ($: Parameters<typeof read>[0], next: Trail) => {
-  await update($, trail, () => next)
+/** 같은 이름이 이미 있으면 뒤에 숫자를 붙인다 — 덮어쓰면 지난 설명이 사라진다 */
+const freeSlug = (taken: Record<string, Trail>, base: string, title: string): string => {
+  const existing = taken[base]
+  if (!existing || existing.title === title) return base
+  for (let n = 2; n < 100; n++) {
+    if (!taken[`${base}${n}`]) return `${base}${n}`
+  }
+  return `${base}${Date.now()}`
+}
+
+const trails = atom({ plugin: 'learn-trail', key: 'trails' } as const, EMPTY)
+
+/**
+ * state 와 store 양쪽에 쓴다.
+ *
+ * atom 은 $.state 에 얹히는데 그건 세션 단위다 — 창을 닫으면 사라진다. 이 mod 의 쓸모가
+ * "나중에 다시 보기" 라서 그걸로는 반쪽이다(2026-10-08 실제로 날렸다). store 가 실패해도
+ * 화면은 돌아가야 하므로 그쪽만 삼킨다.
+ */
+const save = async ($: Parameters<typeof read>[0], next: Trails) => {
+  await update($, trails, () => next)
   await $.store.set(STORE_KEY, next).catch(() => {})
 }
 
-/** 목차를 새로 깔면 진행 상태는 전부 초기화된다 — 반쯤 남은 표시가 섞이면 더 헷갈린다 */
-const startTrail = (title: string, items: string[]): Trail => ({
-  title,
-  items,
-  cursor: items.length > 0 ? 0 : -1,
-  done: [],
-  notes: {},
-  branches: [],
-})
+/** 지금 보고 있는 주제. 없으면 undefined */
+const currentOf = (all: Trails): Trail | undefined => all.byTopic[all.current]
+
+/** 손댄 것으로 표시한다 — 오래된 주제를 고르는 기준이 된다 */
+const touch = (t: Trail): Trail => ({ ...t, touchedAt: Date.now() })
 
 /**
- * 되감아 보여 줄 글. 명령으로 부르든 패널에서 누르든 같은 글이어야 한다.
+ * 되감아 보여 줄 글. 어디서 부르든 같은 글이어야 한다.
  *
- * <p>번호가 범위 밖이면 1번으로 떨어뜨린다. 목차는 있는데 커서가 없다고 아무것도 안
+ * 번호가 범위 밖이면 1번으로 떨어뜨린다. 목차는 있는데 커서가 없다고 아무것도 안
  * 보여 주는 것보다, 첫 항목이라도 보여 주는 쪽이 쓸모 있다.
  */
-const recallText = (t: Trail, at?: number): string => {
+const recallText = (t: Trail | undefined, at?: number): string => {
   if (!t || !Array.isArray(t.items) || t.items.length === 0) {
     return '목차가 비어 있습니다. 설명을 먼저 들어야 되감을 것이 생깁니다.'
   }
   const want = at ?? t.cursor
   const i = want >= 0 && want < t.items.length ? want : 0
-  const head = `${i + 1}. ${t.items[i]}`
+  const head = `${t.title} — ${i + 1}. ${t.items[i]}`
   const saved = t.notes?.[String(i)]
-  return saved
-    ? `${head}\n\n${saved}`
-    : `${head}\n\n(이 항목은 아직 설명이 저장되지 않았습니다.)`
+  return saved ? `${head}\n\n${saved}` : `${head}\n\n(이 항목은 아직 설명이 저장되지 않았습니다.)`
 }
 
-/** 지금 항목을 끝낸 것으로 치고 다음으로 — 곁가지가 남아 있으면 옮기지 않는다 */
+/** 목차를 새로 깔면 그 주제의 진행 상태는 초기화된다 — 반쯤 남은 표시가 섞이면 더 헷갈린다 */
+const startTrail = (title: string, slug: string, items: string[]): Trail => ({
+  title,
+  slug,
+  items,
+  cursor: items.length > 0 ? 0 : -1,
+  done: [],
+  notes: {},
+  branches: [],
+  touchedAt: Date.now(),
+})
+
+/** 지금 항목을 끝낸 것으로 치고 다음으로 */
 const advance = (t: Trail): Trail => {
   if (t.cursor < 0) return t
   const done = t.done.includes(t.cursor) ? t.done : [...t.done, t.cursor]
   const next = t.cursor + 1
   return { ...t, done, cursor: next < t.items.length ? next : -1 }
+}
+
+/** 오래 손 안 댔고 아직 "두기" 를 고르지 않은 주제들 */
+const staleOf = (all: Trails): Trail[] => {
+  const line = Date.now() - STALE_DAYS * DAY
+  return Object.values(all.byTopic).filter(
+    t => t.touchedAt < line && !all.kept.includes(t.slug) && t.slug !== all.current,
+  )
+}
+
+/** 며칠 전인지 — 사람이 읽는 말로 */
+const agoOf = (at: number): string => {
+  const days = Math.floor((Date.now() - at) / DAY)
+  return days >= 1 ? `${days}일 전` : '오늘'
 }
 
 export const register: Register = on => {
@@ -67,11 +112,20 @@ export const register: Register = on => {
       name: 'trail',
       description: '학습 경로 패널을 연다 (지금 어디를 설명 중인지)',
     })
-    // 이름이 짧아야 쓴다. /r 2 로 2번 설명이 바로 뜬다
     await $.command.register({
-      name: 'r',
-      description: '설명 다시 보기 — /r 2 처럼 번호를 준다 (번호 없으면 지금 항목)',
+      name: 'recall',
+      description: '지난 설명을 그대로 다시 본다 — /recall hikari 1 (주제는 생략 가능)',
     })
+
+    // 지난 세션에서 쌓아 둔 것을 되살린다
+    try {
+      const saved = (await $.store.get(STORE_KEY)) as Trails | undefined
+      if (saved && saved.byTopic) {
+        await update($, trails, () => ({ ...EMPTY, ...saved }))
+      }
+    } catch {
+      // 복원 실패는 조용히 넘긴다 — 빈 목차로 시작하면 된다
+    }
 
     // 모델이 설명하면서 직접 부른다. 사람이 챙길 일이 없어야 한다
     await $.tool.register({
@@ -89,7 +143,7 @@ export const register: Register = on => {
             type: 'string',
             enum: ['set', 'focus', 'next', 'note', 'push', 'pop', 'clear'],
             description:
-              'set=목차 깔기, focus=항목으로 이동, next=다음 항목, note=지금 항목에 요약 남기기, push=곁가지 추가, pop=곁가지 닫기, clear=비우기',
+              'set=목차 깔기, focus=항목으로 이동, next=다음 항목, note=항목에 본문 저장, push=곁가지 추가, pop=곁가지 닫기, clear=지금 주제 지우기',
           },
           title: { type: 'string', description: 'set 일 때 설명 전체 제목' },
           items: {
@@ -97,27 +151,17 @@ export const register: Register = on => {
             items: { type: 'string' },
             description: 'set 일 때 목차 항목들 (순서가 번호)',
           },
-          index: { type: 'number', description: 'focus 일 때 항목 번호 (1부터)' },
+          index: { type: 'number', description: 'focus·note 일 때 항목 번호 (1부터)' },
           label: { type: 'string', description: 'push 일 때 곁가지 질문 한 줄' },
           text: {
             type: 'string',
             description:
-              'note 일 때 그 항목의 요약. 두세 줄로 짧게 — 나중에 돌아왔을 때 이것만 보고 기억이 나야 한다',
+              'note 일 때 그 항목의 설명 본문. 요약하지 말고 방금 쓴 글을 그대로 넣는다 — 사람이 번호를 부르면 이 글이 그대로 다시 뜬다',
           },
         },
         required: ['action'],
       },
     })
-
-    // 지난 세션에서 쌓아 둔 것을 되살린다
-    try {
-      const saved = (await $.store.get(STORE_KEY)) as Trail | undefined
-      if (saved && Array.isArray(saved.items)) {
-        await update($, trail, () => saved)
-      }
-    } catch {
-      // 복원 실패는 조용히 넘긴다 — 빈 목차로 시작하면 된다
-    }
 
     return next(e)
   })
@@ -125,12 +169,10 @@ export const register: Register = on => {
   /**
    * 모델에게 이 도구가 있다는 걸 알려 준다.
    *
-   * <p>도구만 등록해 두면 모델이 알아서 부르지 않는다 — 도구 설명은 "부를지 말지" 고민할
+   * 도구만 등록해 두면 모델이 알아서 부르지 않는다 — 도구 설명은 "부를지 말지" 고민할
    * 때나 읽히고, 설명을 쓰기 시작하면 그냥 쓴다. 실제로 그래서 패널이 빈 채로 있었다.
-   * 시스템 프롬프트에 한 단락을 얹어 "설명이 갈래지면 먼저 목차를 깔아라"고 말해 준다.
    *
-   * <p>`session` 쪽에 둔다. 이 문단은 이 사람의 세션에서만 읽히는 것이라 공용 캐시에
-   * 얹을 값이 아니다.
+   * `session` 쪽에 둔다. 이 문단은 이 사람의 세션에서만 읽히니 공용 캐시에 얹을 값이 아니다.
    */
   on('prompt.compose', async ($, e, next) => {
     const result = await next(e)
@@ -145,10 +187,10 @@ export const register: Register = on => {
             '',
             '설명을 두 갈래 이상으로 나눠서 답할 때는, 글을 쓰기 전에 trail 도구를 먼저 부른다.',
             '',
-            '- `set` — 목차를 깐다. title 과 items (항목 제목들). 설명을 시작할 때 한 번',
+            '- `set` — 목차를 깐다. title 과 items. 설명을 시작할 때 한 번',
             '- `focus` / `next` — 항목을 옮긴다. 그 항목을 쓰기 시작할 때마다',
             '- `note` — 그 항목의 설명 본문을 저장한다. 한 항목을 다 쓴 직후에.',
-            '  사람이 나중에 그 번호를 누르면 이 글이 그대로 다시 뜬다. 요약이 아니라',
+            '  사람이 나중에 그 번호를 부르면 이 글이 그대로 다시 뜬다. 요약이 아니라',
             '  방금 쓴 설명을 그대로 넣는다 — 다시 쓰면 말이 달라진다',
             '- `push` / `pop` — 사람이 중간에 다른 걸 물어 곁가지로 빠질 때 열고, 답한 뒤 닫는다',
             '',
@@ -169,31 +211,58 @@ export const register: Register = on => {
   })
 
   /**
-   * 저장해 둔 본문을 대화에 다시 띄운다.
+   * 지난 설명을 대화로 받는다.
    *
-   * <p>훅 안에서 직접 try 로 감싼다. 바깥 {@code .catch} 는 훅이 "던졌을" 때만 불리는데,
-   * 응답이 아예 안 돌아오면(시간 초과) 엔진은 "아무도 답하지 않았다"고만 말하고 끝난다 —
-   * 2026-10-08 에 그 상태로 한참 헤맸다. 어디까지 갔는지를 글로 돌려줘야 알 수 있다.
+   * 패널에서 눌러 대화에 글을 띄우는 길은 없었다 — `$.command.run` 은 결과를 부른 자리로
+   * 돌려줄 뿐이고, `$.session.append` 는 행을 넣어도 화면에 그려지지 않는다(system 도
+   * user 도 그랬다). 그래서 대화로 받는 길은 이 명령 하나다.
    *
-   * <p>타이머로 상한을 거는 짓은 하지 않는다. Promise.race 로 걸면 읽기가 이겼을 때
-   * 타이머가 남아 2초 뒤에 혼자 거절하고, 받는 곳이 없는 거절 하나가 플러그인 환경을
-   * 통째로 죽인다. 첫 호출만 되고 그 뒤로 전부 "아무도 답하지 않았다" 가 됐던 원인이다.
-   * 안전장치가 고장의 원인이었다.
+   * `/recall hikari 1` · `/recall 1` · `/recall hikari` · `/recall` 을 모두 받는다.
+   * 어느 쪽이 주제고 어느 쪽이 번호인지는 생김새로 가른다 — 순서를 외우게 하지 않는다.
    */
-  on('command.run', { command: 'r' }, async ($, e) => {
-    try {
-      // "2" 처럼 번호를 주면 그 항목, 없으면 지금 항목. 사람이 보는 번호는 1부터
-      const asked = Number.parseInt((e.args ?? '').trim(), 10)
-      const at = Number.isFinite(asked) ? asked - 1 : undefined
-      const t = await read($, trail)
-      // 번호로 불렀으면 거기로 옮겨 둔다 — 패널의 "지금" 도 따라가야 혼선이 없다
-      if (at !== undefined && at >= 0 && at < t.items.length && at !== t.cursor) {
-        await save($, { ...t, cursor: at })
-      }
-      return { text: recallText(t, at) }
-    } catch (err) {
-      return { text: `다시 보기 실패 — ${String(err)}` }
+  on('command.run', { command: 'recall' }, async ($, e) => {
+    const all = await read($, trails)
+    const words = (e.args ?? '').trim().split(/\s+/).filter(Boolean)
+
+    let at: number | undefined
+    let topic = ''
+    for (const w of words) {
+      const n = Number.parseInt(w, 10)
+      if (Number.isFinite(n) && String(n) === w) at = n - 1
+      else topic = w.toLowerCase()
     }
+
+    let t = currentOf(all)
+    if (topic !== '') {
+      // 앞부분만 쳐도 찾아 준다. 전체 이름을 외우게 하면 번호를 외우는 것과 다를 바 없다
+      const hit = Object.values(all.byTopic).find(
+        x => x.slug.startsWith(topic) || x.title.toLowerCase().includes(topic),
+      )
+      if (!hit) {
+        const names = Object.values(all.byTopic).map(x => `${x.slug} — ${x.title}`)
+        return {
+          text:
+            names.length > 0
+              ? `"${topic}" 로 시작하는 주제가 없습니다.\n\n들고 있는 주제:\n- ${names.join('\n- ')}`
+              : '아직 들고 있는 주제가 없습니다.',
+        }
+      }
+      t = hit
+    }
+
+    if (!t) return { text: '아직 들고 있는 주제가 없습니다.' }
+
+    // 부른 자리로 패널의 "지금" 도 옮긴다. 보여 준 것과 패널이 다르면 그게 더 헷갈린다
+    const i = at !== undefined && at >= 0 && at < t.items.length ? at : t.cursor
+    await save($, {
+      ...all,
+      current: t.slug,
+      byTopic: { ...all.byTopic, [t.slug]: touch({ ...t, cursor: i }) },
+    })
+    return { text: recallText(t, at) }
+  }).catch(($, e, next) => {
+    if (next.called) return next(e)
+    return { text: `다시 보기 실패 — ${String(next.error?.message ?? next.error)}` }
   })
 
   on('tool.call', { tool: 'mcp__learn-trail__trail' }, async ($, e) => {
@@ -213,59 +282,102 @@ export const register: Register = on => {
     // 상태 갱신이 실패해도 호출 자체는 성공으로 돌려준다.
     // 패널이 안 그려지는 것보다 설명이 끊기는 게 나쁘다
     try {
-      const before = await read($, trail)
-      const after = ((t: Trail) => {
-        switch (input.action) {
-          case 'set': {
-            const items = input.items ?? []
-            line = `목차 ${items.length}개 — ${input.title ?? ''}`
-            return startTrail(input.title ?? '', items)
+      const all = await read($, trails)
+      const cur = currentOf(all)
+
+      /** 그 주제를 지금 주제로 세우고 저장할 모양을 만든다 */
+      const put = (t: Trail): Trails => ({
+        ...all,
+        current: t.slug,
+        byTopic: { ...all.byTopic, [t.slug]: touch(t) },
+      })
+
+      switch (input.action) {
+        case 'set': {
+          const title = input.title ?? ''
+          const items = input.items ?? []
+          const slug = freeSlug(all.byTopic, slugOf(title), title)
+          line = `목차 ${items.length}개 — ${title} (/recall ${slug} 1)`
+          await save($, put(startTrail(title, slug, items)))
+          break
+        }
+        case 'focus': {
+          if (!cur) {
+            line = '목차가 없다'
+            break
           }
-          case 'focus': {
-            // 사람이 보는 번호는 1부터, 안에서는 0부터
-            const i = Math.max(0, Math.min((input.index ?? 1) - 1, t.items.length - 1))
-            const done = t.cursor >= 0 && t.cursor < i && !t.done.includes(t.cursor)
-              ? [...t.done, t.cursor]
-              : t.done
-            line = `${i + 1}번으로 — ${t.items[i] ?? ''}`
-            return { ...t, cursor: i, done }
+          // 사람이 보는 번호는 1부터, 안에서는 0부터
+          const i = Math.max(0, Math.min((input.index ?? 1) - 1, cur.items.length - 1))
+          const done =
+            cur.cursor >= 0 && cur.cursor < i && !cur.done.includes(cur.cursor)
+              ? [...cur.done, cur.cursor]
+              : cur.done
+          line = `${i + 1}번으로 — ${cur.items[i] ?? ''}`
+          await save($, put({ ...cur, cursor: i, done }))
+          break
+        }
+        case 'next': {
+          if (!cur) {
+            line = '목차가 없다'
+            break
           }
-          case 'next': {
-            const moved = advance(t)
-            line = moved.cursor < 0 ? '목차 끝' : `${moved.cursor + 1}번으로 — ${moved.items[moved.cursor]}`
-            return moved
+          const moved = advance(cur)
+          line =
+            moved.cursor < 0
+              ? '목차 끝'
+              : `${moved.cursor + 1}번으로 — ${moved.items[moved.cursor]}`
+          await save($, put(moved))
+          break
+        }
+        case 'note': {
+          if (!cur) {
+            line = '본문을 붙일 목차가 없다'
+            break
           }
-          case 'note': {
           // 번호를 안 주면 지금 항목에 남긴다
-          const i = input.index !== undefined ? input.index - 1 : t.cursor
-          if (i < 0 || i >= t.items.length) {
-            line = '요약을 붙일 항목이 없다'
-            return t
+          const i = input.index !== undefined ? input.index - 1 : cur.cursor
+          if (i < 0 || i >= cur.items.length) {
+            line = '본문을 붙일 항목이 없다'
+            break
           }
-          line = `${i + 1}번 요약 저장`
-          return { ...t, notes: { ...t.notes, [String(i)]: input.text ?? '' } }
+          line = `${i + 1}번 본문 저장 (/recall ${cur.slug} ${i + 1})`
+          await save($, put({ ...cur, notes: { ...cur.notes, [String(i)]: input.text ?? '' } }))
+          break
         }
         case 'push': {
-            const label = input.label ?? '곁가지'
-            line = `곁가지 열림 — ${label}`
-            return { ...t, branches: [...t.branches, label] }
+          if (!cur) {
+            line = '목차가 없다'
+            break
           }
-          case 'pop': {
-            const closed = t.branches[t.branches.length - 1]
-            line = closed ? `곁가지 닫음 — ${closed}` : '닫을 곁가지 없음'
-            return { ...t, branches: t.branches.slice(0, -1) }
-          }
-          case 'clear': {
-            line = '비움'
-            return EMPTY
-          }
-          default: {
-            line = `모르는 action: ${input.action}`
-            return t
-          }
+          const label = input.label ?? '곁가지'
+          line = `곁가지 열림 — ${label}`
+          await save($, put({ ...cur, branches: [...cur.branches, label] }))
+          break
         }
-      })(before)
-      await save($, after)
+        case 'pop': {
+          if (!cur || cur.branches.length === 0) {
+            line = '닫을 곁가지 없음'
+            break
+          }
+          line = `곁가지 닫음 — ${cur.branches[cur.branches.length - 1]}`
+          await save($, put({ ...cur, branches: cur.branches.slice(0, -1) }))
+          break
+        }
+        case 'clear': {
+          if (!cur) {
+            line = '지울 것 없음'
+            break
+          }
+          const rest = { ...all.byTopic }
+          delete rest[cur.slug]
+          line = `"${cur.title}" 지움`
+          await save($, { ...all, byTopic: rest, current: Object.keys(rest)[0] ?? '' })
+          break
+        }
+        default: {
+          line = `모르는 action: ${input.action}`
+        }
+      }
     } catch (err) {
       line = `패널 갱신 실패 — ${String(err)}`
     }
@@ -289,9 +401,12 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
-    const t = await read($, trail)
+    const all = await read($, trails)
+    const cur = currentOf(all)
+    const stale = staleOf(all)
+    const others = Object.values(all.byTopic).filter(t => t.slug !== all.current)
 
-    if (t.items.length === 0) {
+    if (!cur && others.length === 0) {
       return (
         <Box flexDirection="column">
           <Text dimColor>아직 목차가 없습니다.</Text>
@@ -300,63 +415,128 @@ export const register: Register = on => {
       )
     }
 
+    const folded = cur ? all.collapsed.includes(cur.slug) : false
+
     return (
       <Box flexDirection="column">
-        {t.title !== '' && <Text bold>{t.title}</Text>}
-
-        {/* 단추를 줄로 세운다. Select 로 바꿔 봤지만 터미널에서는 접었다 펴는
-            드롭다운으로 그려져서, 목차를 펼쳐 놓고 보는 이 패널에는 맞지 않았다.
-            화살표로 훑는 목록은 이 표에 없다 — 숫자키가 가장 짧은 길이다 */}
-        {t.items.map((item, i) => {
-          const isNow = i === t.cursor
-          const isDone = t.done.includes(i)
-          const hasNote = Boolean(t.notes?.[String(i)])
-          const mark = isDone ? '✓' : isNow ? '▸' : ' '
-          return (
+        {cur && (
+          <Box flexDirection="column">
+            {/* 제목 줄이 곧 접기 단추다. 따로 두면 좁은 패널에서 줄만 더 먹는다 */}
             <Button
-              key={`item-${i}`}
-              // 1~9 까지. 열 번째부터는 목차가 너무 긴 것이고, 그건 쪼갤 단위가 틀린 신호다
-              hotkey={i < 9 ? String(i + 1) : undefined}
-              autoFocus={isNow || undefined}
+              key="fold"
               plain
-              dimColor={isDone && !isNow}
-              // 점(●)은 "설명이 저장돼 있다" — 눌러서 볼 것이 있다는 표시다
-              label={`${mark} ${i + 1} ${item}${hasNote ? '  ●' : ''}${isNow ? '  ← 지금' : ''}`}
+              label={`${folded ? '▸' : '▾'} ${cur.title}   /recall ${cur.slug}`}
               onPress={async () => {
-                // 누르면 그 항목으로 옮긴다. 본문은 아래에서 패널이 펼친다.
-                //
-                // 대화에 글을 "즉시" 띄우는 길은 없었다. $.command.run 은 결과를 부른
-                // 자리로 돌려줄 뿐이고, $.session.append 는 행을 넣지만 화면에 그려지지
-                // 않는다(system 도 user 도). 버튼에서 바로 보이는 것은 알림과 이 패널뿐이라,
-                // 본문은 패널이 들고 있는다. 대화로 받고 싶으면 /r 2 를 친다
-                const cur = await read($, trail)
-                await save($, { ...cur, cursor: i })
+                const now = await read($, trails)
+                const was = now.collapsed.includes(cur.slug)
+                await save($, {
+                  ...now,
+                  collapsed: was
+                    ? now.collapsed.filter(s => s !== cur.slug)
+                    : [...now.collapsed, cur.slug],
+                })
               }}
             />
-          )
-        })}
 
-        {/* 고른 항목의 본문은 여기서 통째로 펼친다. 패널은 좁지만 글은 접히지 않는다 —
-            줄 수가 많으면 ↑↓ 로 넘긴다. 나머지 항목은 점(●)으로 "볼 것이 있다"만 알린다 */}
-        {t.cursor >= 0 && t.notes?.[String(t.cursor)] && (
+            {!folded &&
+              cur.items.map((item, i) => {
+                const isNow = i === cur.cursor
+                const isDone = cur.done.includes(i)
+                const mark = isDone ? '✓' : isNow ? '▸' : ' '
+                // 점(●)은 "본문이 저장돼 있다" — /recall 로 꺼낼 것이 있다는 표시다
+                const dot = cur.notes?.[String(i)] ? '  ●' : ''
+                return (
+                  <Button
+                    key={`item-${i}`}
+                    // 1~9 까지. 열 번째부터는 목차가 너무 긴 것이고, 쪼갤 단위가 틀린 신호다
+                    hotkey={i < 9 ? String(i + 1) : undefined}
+                    plain
+                    dimColor={isDone && !isNow}
+                    label={`${mark} ${i + 1} ${item}${dot}${isNow ? '  ← 지금' : ''}`}
+                    onPress={async () => {
+                      const now = await read($, trails)
+                      const t = currentOf(now)
+                      if (!t) return
+                      await save($, {
+                        ...now,
+                        byTopic: { ...now.byTopic, [t.slug]: touch({ ...t, cursor: i }) },
+                      })
+                      // 본문은 대화로만 나간다. 패널에서 띄울 길이 없어 명령을 알려 준다
+                      void $.ui.toast(`/recall ${t.slug} ${i + 1}`).catch(() => {})
+                    }}
+                  />
+                )
+              })}
+
+            {!folded && cur.branches.length > 0 && (
+              <Box flexDirection="column" paddingTop={1}>
+                <Text dimColor>곁가지 (답하면 위로 돌아감)</Text>
+                {cur.branches.map((b, i) => (
+                  <Text>{`${'  '.repeat(i)}└ ${b}`}</Text>
+                ))}
+              </Box>
+            )}
+          </Box>
+        )}
+
+        {/* 오래 묵은 주제는 한 번 묻는다. 안 물으면 패널이 길어지기만 한다.
+            "두기" 를 고르면 다시 묻지 않는다 — 켤 때마다 같은 걸 물으면 그게 성가시다 */}
+        {stale.length > 0 && (
           <Box flexDirection="column" paddingTop={1}>
-            <Text dimColor>{'─'.repeat(28)}</Text>
-            <Text>{t.notes[String(t.cursor)]}</Text>
+            <Text dimColor>{`${STALE_DAYS}일 넘게 안 본 주제 — 지울까요?`}</Text>
+            {stale.map(t => (
+              <Box>
+                <Button
+                  key={`drop-${t.slug}`}
+                  plain
+                  label={`  ✕ ${t.title} (${agoOf(t.touchedAt)})`}
+                  onPress={async () => {
+                    const now = await read($, trails)
+                    const rest = { ...now.byTopic }
+                    delete rest[t.slug]
+                    await save($, {
+                      ...now,
+                      byTopic: rest,
+                      current: now.current === t.slug ? (Object.keys(rest)[0] ?? '') : now.current,
+                    })
+                  }}
+                />
+                <Button
+                  key={`keep-${t.slug}`}
+                  plain
+                  dimColor
+                  label="   두기"
+                  onPress={async () => {
+                    const now = await read($, trails)
+                    await save($, { ...now, kept: [...now.kept, t.slug] })
+                  }}
+                />
+              </Box>
+            ))}
+          </Box>
+        )}
+
+        {others.length > 0 && (
+          <Box flexDirection="column" paddingTop={1}>
+            <Text dimColor>다른 주제</Text>
+            {others.map(t => (
+              <Button
+                key={`go-${t.slug}`}
+                plain
+                dimColor
+                label={`  ${t.slug} — ${t.title} (${agoOf(t.touchedAt)})`}
+                onPress={async () => {
+                  const now = await read($, trails)
+                  await save($, { ...now, current: t.slug })
+                }}
+              />
+            ))}
           </Box>
         )}
 
         <Box paddingTop={1}>
-          <Text dimColor>{'ctrl+x tab → 숫자키 · 대화로 받으려면 /r 2'}</Text>
+          <Text dimColor>{'/recall hikari 1  ← 그 설명을 대화로'}</Text>
         </Box>
-
-        {t.branches.length > 0 && (
-          <Box flexDirection="column" paddingTop={1}>
-            <Text dimColor>곁가지 (답하면 위로 돌아감)</Text>
-            {t.branches.map((b, i) => (
-              <Text>{`${'  '.repeat(i)}└ ${b}`}</Text>
-            ))}
-          </Box>
-        )}
       </Box>
     )
   })

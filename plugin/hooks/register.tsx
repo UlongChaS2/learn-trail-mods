@@ -10,7 +10,7 @@ const STORE_KEY = 'trails'
 const STALE_DAYS = 7
 const DAY = 24 * 60 * 60 * 1000
 
-const EMPTY: Trails = { byTopic: {}, current: '', collapsed: [], kept: [] }
+const EMPTY: Trails = { byTopic: {}, current: '', nextNo: 1, collapsed: [], kept: [] }
 
 /**
  * 제목에서 부르기 쉬운 이름을 뽑는다 — "Hikari 커넥션 풀" → `hikari`.
@@ -23,16 +23,6 @@ const slugOf = (title: string): string => {
   if (ascii) return ascii[0]
   const word = title.trim().split(/\s+/)[0] ?? ''
   return word.slice(0, 12) || 'topic'
-}
-
-/** 같은 이름이 이미 있으면 뒤에 숫자를 붙인다 — 덮어쓰면 지난 설명이 사라진다 */
-const freeSlug = (taken: Record<string, Trail>, base: string, title: string): string => {
-  const existing = taken[base]
-  if (!existing || existing.title === title) return base
-  for (let n = 2; n < 100; n++) {
-    if (!taken[`${base}${n}`]) return `${base}${n}`
-  }
-  return `${base}${Date.now()}`
 }
 
 const trails = atom({ plugin: 'learn-trail', key: 'trails' } as const, EMPTY)
@@ -51,6 +41,30 @@ const save = async ($: Parameters<typeof read>[0], next: Trails) => {
 
 /** 지금 보고 있는 주제. 없으면 undefined */
 const currentOf = (all: Trails): Trail | undefined => all.byTopic[all.current]
+
+/**
+ * `/recall` 뒤에 적은 것을 읽는다.
+ *
+ * `2.3` 은 2번 주제의 3번, `2.` 는 2번 주제, `3` 은 지금 주제의 3번, `hikari` 는 이름으로
+ * 찾기. 사람이 보는 번호는 1부터, 안에서는 0부터다.
+ */
+const parseArgs = (args: string): { topic?: string; name?: string; at?: number } => {
+  const out: { topic?: string; name?: string; at?: number } = {}
+  for (const w of args.trim().split(/\s+/).filter(Boolean)) {
+    const dotted = w.match(/^(\d+)\.(\d*)$/)
+    if (dotted) {
+      out.topic = dotted[1]
+      if (dotted[2] !== '') out.at = Number.parseInt(dotted[2], 10) - 1
+      continue
+    }
+    if (/^\d+$/.test(w)) {
+      out.at = Number.parseInt(w, 10) - 1
+      continue
+    }
+    out.name = w.toLowerCase()
+  }
+  return out
+}
 
 /** 손댄 것으로 표시한다 — 오래된 주제를 고르는 기준이 된다 */
 const touch = (t: Trail): Trail => ({ ...t, touchedAt: Date.now() })
@@ -73,9 +87,10 @@ const recallText = (t: Trail | undefined, at?: number): string => {
 }
 
 /** 목차를 새로 깔면 그 주제의 진행 상태는 초기화된다 — 반쯤 남은 표시가 섞이면 더 헷갈린다 */
-const startTrail = (title: string, slug: string, items: string[]): Trail => ({
+const startTrail = (title: string, no: number, items: string[]): Trail => ({
   title,
-  slug,
+  no,
+  slug: slugOf(title),
   items,
   cursor: items.length > 0 ? 0 : -1,
   done: [],
@@ -202,7 +217,39 @@ export const register: Register = on => {
     }
   })
 
-  on('command.run', { command: 'trail' }, async $ => {
+  /**
+   * 패널 열기, 그리고 지우기.
+   *
+   * `/trail` · `/trail drop 2` · `/trail drop all`. 지우는 길이 패널의 ✕ 뿐이면
+   * 묵지 않은 주제는 버릴 수가 없다 — 끝난 주제는 바로 버리고 싶을 때가 있다.
+   */
+  on('command.run', { command: 'trail' }, async ($, e) => {
+    const words = (e.args ?? '').trim().split(/\s+/).filter(Boolean)
+
+    if (words[0] === 'drop') {
+      const all = await read($, trails)
+      const what = words[1] ?? ''
+
+      if (what === 'all') {
+        await save($, { ...EMPTY, nextNo: all.nextNo })
+        return { text: '주제를 전부 지웠습니다.' }
+      }
+
+      // 번호를 안 주면 지금 주제. 가장 흔한 경우다
+      const key = what === '' ? all.current : what
+      const gone = all.byTopic[key]
+      if (!gone) return { text: `${key || '지금'} 주제가 없습니다.` }
+
+      const rest = { ...all.byTopic }
+      delete rest[key]
+      await save($, {
+        ...all,
+        byTopic: rest,
+        current: all.current === key ? (Object.keys(rest)[0] ?? '') : all.current,
+      })
+      return { text: `${gone.no}. ${gone.title} — 지웠습니다.` }
+    }
+
     await $.ui.open({ id: PANE, title: '학습 경로' }).catch(() => {})
     return { text: '학습 경로 패널을 열었습니다.' }
   }).catch(($, e, next) => {
@@ -222,28 +269,29 @@ export const register: Register = on => {
    */
   on('command.run', { command: 'recall' }, async ($, e) => {
     const all = await read($, trails)
-    const words = (e.args ?? '').trim().split(/\s+/).filter(Boolean)
+    const { topic, name, at } = parseArgs(e.args ?? '')
 
-    let at: number | undefined
-    let topic = ''
-    for (const w of words) {
-      const n = Number.parseInt(w, 10)
-      if (Number.isFinite(n) && String(n) === w) at = n - 1
-      else topic = w.toLowerCase()
-    }
+    const list = () =>
+      Object.values(all.byTopic)
+        .sort((a, b) => a.no - b.no)
+        .map(x => `${x.no}. ${x.title}  (/recall ${x.no}.1)`)
 
     let t = currentOf(all)
-    if (topic !== '') {
-      // 앞부분만 쳐도 찾아 준다. 전체 이름을 외우게 하면 번호를 외우는 것과 다를 바 없다
+    if (topic !== undefined) {
+      t = all.byTopic[topic]
+      if (!t) {
+        return { text: `${topic}번 주제가 없습니다.\n\n들고 있는 것:\n- ${list().join('\n- ')}` }
+      }
+    } else if (name !== undefined) {
+      // 번호가 기억 안 날 때를 위해 이름도 받는다. 앞부분만 쳐도 찾는다
       const hit = Object.values(all.byTopic).find(
-        x => x.slug.startsWith(topic) || x.title.toLowerCase().includes(topic),
+        x => x.slug.startsWith(name) || x.title.toLowerCase().includes(name),
       )
       if (!hit) {
-        const names = Object.values(all.byTopic).map(x => `${x.slug} — ${x.title}`)
         return {
           text:
-            names.length > 0
-              ? `"${topic}" 로 시작하는 주제가 없습니다.\n\n들고 있는 주제:\n- ${names.join('\n- ')}`
+            list().length > 0
+              ? `"${name}" 에 맞는 주제가 없습니다.\n\n들고 있는 것:\n- ${list().join('\n- ')}`
               : '아직 들고 있는 주제가 없습니다.',
         }
       }
@@ -256,8 +304,8 @@ export const register: Register = on => {
     const i = at !== undefined && at >= 0 && at < t.items.length ? at : t.cursor
     await save($, {
       ...all,
-      current: t.slug,
-      byTopic: { ...all.byTopic, [t.slug]: touch({ ...t, cursor: i }) },
+      current: String(t.no),
+      byTopic: { ...all.byTopic, [String(t.no)]: touch({ ...t, cursor: i }) },
     })
     return { text: recallText(t, at) }
   }).catch(($, e, next) => {
@@ -288,17 +336,21 @@ export const register: Register = on => {
       /** 그 주제를 지금 주제로 세우고 저장할 모양을 만든다 */
       const put = (t: Trail): Trails => ({
         ...all,
-        current: t.slug,
-        byTopic: { ...all.byTopic, [t.slug]: touch(t) },
+        current: String(t.no),
+        byTopic: { ...all.byTopic, [String(t.no)]: touch(t) },
       })
 
       switch (input.action) {
         case 'set': {
           const title = input.title ?? ''
           const items = input.items ?? []
-          const slug = freeSlug(all.byTopic, slugOf(title), title)
-          line = `목차 ${items.length}개 — ${title} (/recall ${slug} 1)`
-          await save($, put(startTrail(title, slug, items)))
+          const no = all.nextNo
+          line = `목차 ${items.length}개 — ${title} (/recall ${no}.1)`
+          await save($, {
+            ...put(startTrail(title, no, items)),
+            // 지운 번호는 다시 쓰지 않는다. 같은 번호가 다른 주제를 가리키면 헷갈린다
+            nextNo: no + 1,
+          })
           break
         }
         case 'focus': {
@@ -340,7 +392,7 @@ export const register: Register = on => {
             line = '본문을 붙일 항목이 없다'
             break
           }
-          line = `${i + 1}번 본문 저장 (/recall ${cur.slug} ${i + 1})`
+          line = `본문 저장 (/recall ${cur.no}.${i + 1})`
           await save($, put({ ...cur, notes: { ...cur.notes, [String(i)]: input.text ?? '' } }))
           break
         }
@@ -369,7 +421,7 @@ export const register: Register = on => {
             break
           }
           const rest = { ...all.byTopic }
-          delete rest[cur.slug]
+          delete rest[String(cur.no)]
           line = `"${cur.title}" 지움`
           await save($, { ...all, byTopic: rest, current: Object.keys(rest)[0] ?? '' })
           break
@@ -404,7 +456,9 @@ export const register: Register = on => {
     const all = await read($, trails)
     const cur = currentOf(all)
     const stale = staleOf(all)
-    const others = Object.values(all.byTopic).filter(t => t.slug !== all.current)
+    const others = Object.values(all.byTopic)
+      .filter(t => String(t.no) !== all.current)
+      .sort((a, b) => a.no - b.no)
 
     if (!cur && others.length === 0) {
       return (
@@ -415,28 +469,44 @@ export const register: Register = on => {
       )
     }
 
-    const folded = cur ? all.collapsed.includes(cur.slug) : false
+    /** 주제 하나를 버린다. 지운 번호는 다시 쓰지 않는다 */
+    const drop = async (key: string) => {
+      const now = await read($, trails)
+      const rest = { ...now.byTopic }
+      delete rest[key]
+      await save($, {
+        ...now,
+        byTopic: rest,
+        current: now.current === key ? (Object.keys(rest)[0] ?? '') : now.current,
+      })
+    }
+
+    const folded = cur ? all.collapsed.includes(String(cur.no)) : false
 
     return (
       <Box flexDirection="column">
         {cur && (
           <Box flexDirection="column">
             {/* 제목 줄이 곧 접기 단추다. 따로 두면 좁은 패널에서 줄만 더 먹는다 */}
-            <Button
-              key="fold"
-              plain
-              label={`${folded ? '▸' : '▾'} ${cur.title}   /recall ${cur.slug}`}
-              onPress={async () => {
-                const now = await read($, trails)
-                const was = now.collapsed.includes(cur.slug)
-                await save($, {
-                  ...now,
-                  collapsed: was
-                    ? now.collapsed.filter(s => s !== cur.slug)
-                    : [...now.collapsed, cur.slug],
-                })
-              }}
-            />
+            <Box>
+              <Button
+                key="fold"
+                plain
+                label={`${folded ? '▸' : '▾'} ${cur.no}. ${cur.title}`}
+                onPress={async () => {
+                  const now = await read($, trails)
+                  const key = String(cur.no)
+                  const was = now.collapsed.includes(key)
+                  await save($, {
+                    ...now,
+                    collapsed: was
+                      ? now.collapsed.filter(s2 => s2 !== key)
+                      : [...now.collapsed, key],
+                  })
+                }}
+              />
+              <Button key="drop-cur" plain dimColor label="  ✕" onPress={() => drop(String(cur.no))} />
+            </Box>
 
             {!folded &&
               cur.items.map((item, i) => {
@@ -452,17 +522,18 @@ export const register: Register = on => {
                     hotkey={i < 9 ? String(i + 1) : undefined}
                     plain
                     dimColor={isDone && !isNow}
-                    label={`${mark} ${i + 1} ${item}${dot}${isNow ? '  ← 지금' : ''}`}
+                    // 번호를 주소 그대로 적는다. 패널에서 읽어 치면 된다
+                    label={`${mark} ${cur.no}.${i + 1} ${item}${dot}${isNow ? '  ← 지금' : ''}`}
                     onPress={async () => {
                       const now = await read($, trails)
                       const t = currentOf(now)
                       if (!t) return
                       await save($, {
                         ...now,
-                        byTopic: { ...now.byTopic, [t.slug]: touch({ ...t, cursor: i }) },
+                        byTopic: { ...now.byTopic, [String(t.no)]: touch({ ...t, cursor: i }) },
                       })
                       // 본문은 대화로만 나간다. 패널에서 띄울 길이 없어 명령을 알려 준다
-                      void $.ui.toast(`/recall ${t.slug} ${i + 1}`).catch(() => {})
+                      void $.ui.toast(`/recall ${t.no}.${i + 1}`).catch(() => {})
                     }}
                   />
                 )
@@ -487,28 +558,19 @@ export const register: Register = on => {
             {stale.map(t => (
               <Box>
                 <Button
-                  key={`drop-${t.slug}`}
+                  key={`drop-${t.no}`}
                   plain
-                  label={`  ✕ ${t.title} (${agoOf(t.touchedAt)})`}
-                  onPress={async () => {
-                    const now = await read($, trails)
-                    const rest = { ...now.byTopic }
-                    delete rest[t.slug]
-                    await save($, {
-                      ...now,
-                      byTopic: rest,
-                      current: now.current === t.slug ? (Object.keys(rest)[0] ?? '') : now.current,
-                    })
-                  }}
+                  label={`  ✕ ${t.no}. ${t.title} (${agoOf(t.touchedAt)})`}
+                  onPress={() => drop(String(t.no))}
                 />
                 <Button
-                  key={`keep-${t.slug}`}
+                  key={`keep-${t.no}`}
                   plain
                   dimColor
                   label="   두기"
                   onPress={async () => {
                     const now = await read($, trails)
-                    await save($, { ...now, kept: [...now.kept, t.slug] })
+                    await save($, { ...now, kept: [...now.kept, String(t.no)] })
                   }}
                 />
               </Box>
@@ -520,22 +582,25 @@ export const register: Register = on => {
           <Box flexDirection="column" paddingTop={1}>
             <Text dimColor>다른 주제</Text>
             {others.map(t => (
-              <Button
-                key={`go-${t.slug}`}
-                plain
-                dimColor
-                label={`  ${t.slug} — ${t.title} (${agoOf(t.touchedAt)})`}
-                onPress={async () => {
-                  const now = await read($, trails)
-                  await save($, { ...now, current: t.slug })
-                }}
-              />
+              <Box>
+                <Button
+                  key={`go-${t.no}`}
+                  plain
+                  dimColor
+                  label={`  ${t.no}. ${t.title} (${agoOf(t.touchedAt)})`}
+                  onPress={async () => {
+                    const now = await read($, trails)
+                    await save($, { ...now, current: String(t.no) })
+                  }}
+                />
+                <Button key={`x-${t.no}`} plain dimColor label="  ✕" onPress={() => drop(String(t.no))} />
+              </Box>
             ))}
           </Box>
         )}
 
         <Box paddingTop={1}>
-          <Text dimColor>{'/recall hikari 1  ← 그 설명을 대화로'}</Text>
+          <Text dimColor>{'/recall 1.2  ← 그 설명을 대화로   ·   ✕ 또는 /trail drop 1'}</Text>
         </Box>
       </Box>
     )

@@ -13,7 +13,7 @@ test('set 이 목차를 깔고 부를 이름을 만든다', async $ => {
 
   expect(res.text).toContain('목차 2개')
   // "Hikari 커넥션 풀" → hikari. 번호만 외우게 하면 주제가 여럿일 때 못 찾는다
-  expect(res.text).toContain('/recall hikari 1')
+  expect(res.text).toContain('/recall 1.1')
 })
 
 /** 곁가지는 쌓이고, 답하면 빠진다 — 이게 이 mod 를 만든 이유다 */
@@ -79,12 +79,13 @@ test('주제와 번호로 찾는다', async $ => {
   await $.tool.call({ tool: TOOL, action: 'set', title: 'Vertica 붙이기', items: ['가', '나', '다'] })
   await $.tool.call({ tool: TOOL, action: 'note', index: 3, text: '셋째 본문' })
 
-  const byBoth = await $.command.run({ command: 'recall', args: 'vertica 3' })
-  expect(byBoth.text).toContain('셋째 본문')
+  // 패널에 찍힌 주소를 그대로 친다
+  const byNo = await $.command.run({ command: 'recall', args: '1.3' })
+  expect(byNo.text).toContain('셋째 본문')
 
-  // 앞부분만 쳐도 찾는다. 전체를 외우게 하면 번호를 외우는 것과 다를 바 없다
-  const byPrefix = await $.command.run({ command: 'recall', args: 'vert 3' })
-  expect(byPrefix.text).toContain('셋째 본문')
+  // 번호가 기억 안 나면 이름으로도 찾는다. 앞부분만 쳐도 된다
+  const byName = await $.command.run({ command: 'recall', args: 'vert 3' })
+  expect(byName.text).toContain('셋째 본문')
 })
 
 /** 주제가 여럿이어도 지난 것이 안 날아간다 — 하나만 들고 있으면 이 mod 는 반쪽이다 */
@@ -95,7 +96,7 @@ test('새 주제를 깔아도 앞 주제가 남아 있다', async $ => {
   await $.tool.call({ tool: TOOL, action: 'set', title: 'Jasypt 열쇠', items: ['가'] })
   await $.tool.call({ tool: TOOL, action: 'note', index: 1, text: '제이시프트 본문' })
 
-  const old = await $.command.run({ command: 'recall', args: 'hikari 1' })
+  const old = await $.command.run({ command: 'recall', args: '1.1' })
   expect(old.text).toContain('히카리 본문')
 })
 
@@ -104,13 +105,35 @@ test('없는 주제를 부르면 목록을 알려 준다', async $ => {
   await $.tool.call({ tool: TOOL, action: 'set', title: 'Hikari 풀', items: ['가'] })
 
   const res = await $.command.run({ command: 'recall', args: 'nosuch' })
-  expect(res.text).toContain('hikari')
+  expect(res.text).toContain('Hikari 풀')
 })
 
-/** 끝난 주제는 버린다 */
+/** 끝난 주제는 버린다 — 모델이 clear 로, 사람이 /trail drop 으로 */
 test('clear 로 지금 주제를 지운다', async $ => {
   await $.tool.call({ tool: TOOL, action: 'set', title: 'Temp 주제', items: ['가'] })
   const res = await $.tool.call({ tool: TOOL, action: 'clear' })
 
   expect(res.text).toContain('지움')
+})
+
+test('/trail drop 으로 번호를 찍어 지운다', async $ => {
+  await $.tool.call({ tool: TOOL, action: 'set', title: 'Alpha 주제', items: ['가'] })
+  await $.tool.call({ tool: TOOL, action: 'set', title: 'Beta 주제', items: ['가'] })
+
+  const dropped = await $.command.run({ command: 'trail', args: 'drop 1' })
+  expect(dropped.text).toContain('지웠습니다')
+
+  // 지운 것은 더 이상 안 나온다
+  const gone = await $.command.run({ command: 'recall', args: '1.1' })
+  expect(gone.text).toContain('1번 주제가 없습니다')
+})
+
+test('/trail drop all 로 전부 지운다', async $ => {
+  await $.tool.call({ tool: TOOL, action: 'set', title: 'Gamma 주제', items: ['가'] })
+
+  const res = await $.command.run({ command: 'trail', args: 'drop all' })
+  expect(res.text).toContain('전부 지웠습니다')
+
+  const after = await $.command.run({ command: 'recall' })
+  expect(after.text).toContain('아직 들고 있는 주제가 없습니다')
 })

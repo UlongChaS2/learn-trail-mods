@@ -329,12 +329,19 @@ export const register: Register = on => {
                 const cur = await read($, trail)
                 await save($, { ...cur, cursor: i })
                 // 패널은 좁다. 본문은 대화로 돌려준다.
+                //
                 // $.command.run 으로는 안 된다 — 명령을 돌리고 결과를 이 자리로 돌려줄 뿐
-                // 대화에 찍지는 않는다. system 행이라 모델 문맥은 더럽히지 않는다
+                // 대화에 찍지는 않는다. 사람이 /r 을 직접 칠 때 보이는 것은 엔진이 찍어
+                // 주기 때문이다.
+                //
+                // system 행으로도 안 된다. 넣기는 성공하는데(실패 알림이 안 떴다) 화면에
+                // 그려지지 않는다 — 모델만 안 읽는 게 아니라 사람에게도 안 보인다.
+                // user 행은 보인다. 모델이 함께 읽는 것은 감수한다. 지난 설명을 다시
+                // 꺼내 보는 것이라 문맥에 들어가도 틀린 내용이 아니다
                 await $.session
                   .append({
                     message: {
-                      type: 'system',
+                      type: 'user',
                       content: [{ type: 'text', text: recallText(cur, i) }],
                     },
                   })

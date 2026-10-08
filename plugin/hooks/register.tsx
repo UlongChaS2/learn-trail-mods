@@ -323,6 +323,9 @@ export const register: Register = on => {
               // 점(●)은 "설명이 저장돼 있다" — 눌러서 볼 것이 있다는 표시다
               label={`${mark} ${i + 1} ${item}${hasNote ? '  ●' : ''}${isNow ? '  ← 지금' : ''}`}
               onPress={async () => {
+                // 눌렸다는 것부터 눈에 보이게 한다. 대화에 글이 안 떴을 때
+                // "안 눌린 것"과 "넣는 데서 막힌 것"을 가르는 유일한 단서다
+                void $.ui.toast(`${i + 1}번 — 대화에 띄웁니다`).catch(() => {})
                 const cur = await read($, trail)
                 await save($, { ...cur, cursor: i })
                 // 패널은 좁다. 본문은 대화로 돌려준다.
@@ -335,7 +338,9 @@ export const register: Register = on => {
                       content: [{ type: 'text', text: recallText(cur, i) }],
                     },
                   })
-                  .catch(() => {})
+                  .catch(err => {
+                    void $.ui.toast(`대화에 넣기 실패 — ${String(err)}`).catch(() => {})
+                  })
               }}
             />
           )

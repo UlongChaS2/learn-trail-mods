@@ -152,7 +152,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'trail',
-      description: '학습 경로 패널을 연다 (지금 어디를 설명 중인지)',
+      description: '학습 경로 패널을 열고 쌓기 시작한다 (/trail off 로 그만, /trail drop N 으로 지움)',
     })
     await $.command.register({
       name: 'recall',
@@ -287,16 +287,10 @@ export const register: Register = on => {
   on('command.run', { command: 'trail' }, async ($, e) => {
     const words = (e.args ?? '').trim().split(/\s+/).filter(Boolean)
 
-    if (words[0] === 'on' || words[0] === 'off') {
-      const want = words[0] === 'on'
+    if (words[0] === 'off') {
       const all = await read($, trails)
-      await save($, { ...all, on: want })
-      if (want) void $.ui.open({ id: PANE, title: '학습 경로' }).catch(() => {})
-      return {
-        text: want
-          ? '학습 경로를 켰습니다. 설명이 여러 갈래로 나뉘면 목차가 쌓입니다.'
-          : '학습 경로를 껐습니다. 쌓인 것은 /recall 로 그대로 볼 수 있습니다.',
-      }
+      await save($, { ...all, on: false })
+      return { text: '그만 쌓습니다. 쌓인 것은 /recall 로 그대로 볼 수 있습니다.' }
     }
 
     if (words[0] === 'drop') {
@@ -323,8 +317,16 @@ export const register: Register = on => {
       return { text: `${gone.no}. ${gone.title} — 지웠습니다.` }
     }
 
+    // 패널을 여는 것 자체가 "쓰겠다" 는 뜻이다. 따로 켜게 하면, 열어 놓고 안 쌓이는
+    // 걸 보며 왜 비었는지 묻게 된다 — 실제로 그랬다. 끄는 것만 따로 둔다
+    const all = await read($, trails)
+    if (!all.on) await save($, { ...all, on: true })
     await $.ui.open({ id: PANE, title: '학습 경로' }).catch(() => {})
-    return { text: '학습 경로 패널을 열었습니다.' }
+    return {
+      text: all.on
+        ? '학습 경로 패널을 열었습니다.'
+        : '학습 경로를 열었습니다. 설명이 여러 갈래로 나뉘면 목차가 쌓입니다 (그만하려면 /trail off).',
+    }
   }).catch(($, e, next) => {
     if (next.called) return next(e)
     return { text: `패널 열기 실패 — ${String(next.error?.message ?? next.error)}` }
@@ -543,7 +545,7 @@ export const register: Register = on => {
           {all.on ? (
             <Text dimColor>설명이 여러 갈래로 나뉠 때 자동으로 채워집니다.</Text>
           ) : (
-            <Text dimColor>/trail on 하면 설명이 쌓이기 시작합니다.</Text>
+            <Text dimColor>/trail 하면 쌓이기 시작합니다.</Text>
           )}
         </Box>
       )
@@ -681,7 +683,7 @@ export const register: Register = on => {
         {/* 쓸 수 있는 말을 상자에 모은다. 목차 줄들과 섞여 흐르면 안내인지 항목인지
             구분이 안 된다 — 테두리가 그 경계를 긋는다 */}
         <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1} marginTop={1}>
-          <Text dimColor>{all.on ? '쌓는 중 — 끄려면  /trail off' : '꺼짐 — 켜려면  /trail on'}</Text>
+          <Text dimColor>{all.on ? '쌓는 중 — 그만하려면  /trail off' : '멈춤 — 다시 쌓으려면  /trail'}</Text>
           <Text dimColor>{'설명을 대화로 받기   /recall 1.2'}</Text>
           <Text dimColor>{'주제 지우기          /trail drop 1'}</Text>
           <Text dimColor>{'이 패널로 들어오기   ctrl+x 누르고 tab'}</Text>

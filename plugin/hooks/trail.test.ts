@@ -10,7 +10,7 @@ const TOOL = 'mcp__learn-trail__trail'
 
 /** 목차를 깔면 1번이 '지금' 이 되고, 주제 이름이 제목에서 뽑힌다 */
 test('set 이 목차를 깔고 부를 이름을 만든다', async $ => {
-  await $.command.run({ command: 'trail', args: 'on' })
+  await $.command.run({ command: 'trail' })
   const res = await $.tool.call({
     tool: TOOL,
     action: 'set',
@@ -25,7 +25,7 @@ test('set 이 목차를 깔고 부를 이름을 만든다', async $ => {
 
 /** 곁가지는 쌓이고, 답하면 빠진다 — 이게 이 mod 를 만든 이유다 */
 test('push 로 곁가지를 쌓고 pop 으로 돌아온다', async $ => {
-  await $.command.run({ command: 'trail', args: 'on' })
+  await $.command.run({ command: 'trail' })
   await $.tool.call({ tool: TOOL, action: 'set', title: 'x y', items: ['하나', '둘'] })
 
   const pushed = await $.tool.call({ tool: TOOL, action: 'push', label: '커넥션 풀이 뭔지' })
@@ -37,7 +37,7 @@ test('push 로 곁가지를 쌓고 pop 으로 돌아온다', async $ => {
 
 /** 닫을 것이 없을 때 터지지 않는다 */
 test('빈 스택에서 pop 해도 죽지 않는다', async $ => {
-  await $.command.run({ command: 'trail', args: 'on' })
+  await $.command.run({ command: 'trail' })
   await $.tool.call({ tool: TOOL, action: 'set', title: 'zed', items: ['하나'] })
   const res = await $.tool.call({ tool: TOOL, action: 'pop' })
 
@@ -46,7 +46,7 @@ test('빈 스택에서 pop 해도 죽지 않는다', async $ => {
 
 /** 모르는 action 도 호출을 실패시키지 않는다 — 설명이 끊기면 안 된다 */
 test('모르는 action 은 조용히 알려주고 넘어간다', async $ => {
-  await $.command.run({ command: 'trail', args: 'on' })
+  await $.command.run({ command: 'trail' })
   const res = await $.tool.call({ tool: TOOL, action: '없는동작' })
 
   expect(res.text).toContain('모르는 action')
@@ -59,7 +59,7 @@ test('모르는 action 은 조용히 알려주고 넘어간다', async $ => {
  * 안 보여 한참 헤맸다 — 테스트로 잡는다.
  */
 test('본문이 아직 없으면 그렇다고 말한다', async $ => {
-  await $.command.run({ command: 'trail', args: 'on' })
+  await $.command.run({ command: 'trail' })
   await $.tool.call({ tool: TOOL, action: 'set', title: 'Hikari 풀', items: ['왜', '무엇'] })
 
 
@@ -75,7 +75,7 @@ test('본문이 아직 없으면 그렇다고 말한다', async $ => {
  * 남은 타이머)이 플러그인 환경을 죽인 탓이다. 한 번 되는 것으로는 모자라다.
  */
 test('연달아 불러도 계속 답한다', async $ => {
-  await $.command.run({ command: 'trail', args: 'on' })
+  await $.command.run({ command: 'trail' })
   await $.tool.call({ tool: TOOL, action: 'set', title: 'Pool 얘기', items: ['하나', '둘'] })
 
   for (let n = 0; n < 3; n++) {
@@ -86,7 +86,7 @@ test('연달아 불러도 계속 답한다', async $ => {
 
 /** 주제 이름과 번호를 함께 준다 — 순서는 상관없다 */
 test('주제와 번호로 찾는다', async $ => {
-  await $.command.run({ command: 'trail', args: 'on' })
+  await $.command.run({ command: 'trail' })
   await $.tool.call({ tool: TOOL, action: 'set', title: 'Vertica 붙이기', items: ['가', '나', '다'] })
   await $.tool.call({ tool: TOOL, action: 'focus', index: 3 })
 
@@ -101,7 +101,7 @@ test('주제와 번호로 찾는다', async $ => {
 
 /** 주제가 여럿이어도 지난 것이 안 날아간다 — 하나만 들고 있으면 이 mod 는 반쪽이다 */
 test('새 주제를 깔아도 앞 주제가 남아 있다', async $ => {
-  await $.command.run({ command: 'trail', args: 'on' })
+  await $.command.run({ command: 'trail' })
   await $.tool.call({ tool: TOOL, action: 'set', title: 'Hikari 풀', items: ['가'] })
 
   await $.tool.call({ tool: TOOL, action: 'set', title: 'Jasypt 열쇠', items: ['가'] })
@@ -112,7 +112,7 @@ test('새 주제를 깔아도 앞 주제가 남아 있다', async $ => {
 
 /** 없는 주제를 부르면 들고 있는 것들을 알려 준다 — 무엇을 칠 수 있는지 모르면 못 쓴다 */
 test('없는 주제를 부르면 목록을 알려 준다', async $ => {
-  await $.command.run({ command: 'trail', args: 'on' })
+  await $.command.run({ command: 'trail' })
   await $.tool.call({ tool: TOOL, action: 'set', title: 'Hikari 풀', items: ['가'] })
 
   const res = await $.command.run({ command: 'recall', args: 'nosuch' })
@@ -121,7 +121,7 @@ test('없는 주제를 부르면 목록을 알려 준다', async $ => {
 
 /** 끝난 주제는 버린다 — 모델이 clear 로, 사람이 /trail drop 으로 */
 test('clear 로 지금 주제를 지운다', async $ => {
-  await $.command.run({ command: 'trail', args: 'on' })
+  await $.command.run({ command: 'trail' })
   await $.tool.call({ tool: TOOL, action: 'set', title: 'Temp 주제', items: ['가'] })
   const res = await $.tool.call({ tool: TOOL, action: 'clear' })
 
@@ -129,7 +129,7 @@ test('clear 로 지금 주제를 지운다', async $ => {
 })
 
 test('/trail drop 으로 번호를 찍어 지운다', async $ => {
-  await $.command.run({ command: 'trail', args: 'on' })
+  await $.command.run({ command: 'trail' })
   await $.tool.call({ tool: TOOL, action: 'set', title: 'Alpha 주제', items: ['가'] })
   await $.tool.call({ tool: TOOL, action: 'set', title: 'Beta 주제', items: ['가'] })
 
@@ -142,7 +142,7 @@ test('/trail drop 으로 번호를 찍어 지운다', async $ => {
 })
 
 test('/trail drop all 로 전부 지운다', async $ => {
-  await $.command.run({ command: 'trail', args: 'on' })
+  await $.command.run({ command: 'trail' })
   await $.tool.call({ tool: TOOL, action: 'set', title: 'Gamma 주제', items: ['가'] })
 
   const res = await $.command.run({ command: 'trail', args: 'drop all' })
@@ -172,16 +172,16 @@ test('꺼져 있으면 아무것도 쌓지 않는다', async $ => {
   expect(after.text).toContain('아직 들고 있는 주제가 없습니다')
 })
 
-test('/trail on 하면 쌓기 시작한다', async $ => {
-  const on = await $.command.run({ command: 'trail', args: 'on' })
-  expect(on.text).toContain('켰습니다')
+test('/trail 하면 쌓기 시작한다', async $ => {
+  const on = await $.command.run({ command: 'trail' })
+  expect(on.text).toContain('쌓입니다')
 
   const res = await $.tool.call({ tool: TOOL, action: 'set', title: 'Hikari 풀', items: ['가'] })
   expect(res.text).toContain('목차 1개')
 
   // 꺼도 쌓인 것은 남는다 — 끄는 것은 "더 쌓지 않는다" 는 뜻이다
   const off = await $.command.run({ command: 'trail', args: 'off' })
-  expect(off.text).toContain('껐습니다')
+  expect(off.text).toContain('그만 쌓습니다')
 
   const still = await $.command.run({ command: 'recall', args: '1.1' })
   expect(still.text).toContain('Hikari 풀')

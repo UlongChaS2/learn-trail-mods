@@ -10,7 +10,7 @@ const STORE_KEY = 'trails'
 const STALE_DAYS = 7
 const DAY = 24 * 60 * 60 * 1000
 
-const EMPTY: Trails = { byTopic: {}, current: '', nextNo: 1, collapsed: [], kept: [] }
+const EMPTY: Trails = { on: false, byTopic: {}, current: '', nextNo: 1, collapsed: [], kept: [] }
 
 /**
  * 제목에서 부르기 쉬운 이름을 뽑는다 — "Hikari 커넥션 풀" → `hikari`.
@@ -186,6 +186,8 @@ export const register: Register = on => {
    */
   on('prompt.compose', async ($, e, next) => {
     const result = await next(e)
+    // 꺼져 있으면 모델에게 아무 말도 하지 않는다. 그래야 끼어들지 않는다
+    if (!(await read($, trails)).on) return result
     return {
       sections: [
         ...result.sections,
@@ -224,6 +226,7 @@ export const register: Register = on => {
     try {
       // 모델이 쓴 답만. 사람의 말·도구 결과·알림은 본문이 아니다
       if (e.door !== 'response') return result
+      if (!(await read($, trails)).on) return result
 
       const text = (e.message?.content ?? [])
         .filter((b: { type?: string }) => b?.type === 'text')
@@ -256,6 +259,18 @@ export const register: Register = on => {
 
   on('command.run', { command: 'trail' }, async ($, e) => {
     const words = (e.args ?? '').trim().split(/\s+/).filter(Boolean)
+
+    if (words[0] === 'on' || words[0] === 'off') {
+      const want = words[0] === 'on'
+      const all = await read($, trails)
+      await save($, { ...all, on: want })
+      if (want) void $.ui.open({ id: PANE, title: '학습 경로' }).catch(() => {})
+      return {
+        text: want
+          ? '학습 경로를 켰습니다. 설명이 여러 갈래로 나뉘면 목차가 쌓입니다.'
+          : '학습 경로를 껐습니다. 쌓인 것은 /recall 로 그대로 볼 수 있습니다.',
+      }
+    }
 
     if (words[0] === 'drop') {
       const all = await read($, trails)
@@ -362,6 +377,9 @@ export const register: Register = on => {
     // 패널이 안 그려지는 것보다 설명이 끊기는 게 나쁘다
     try {
       const all = await read($, trails)
+      if (!all.on) {
+        return { result: '학습 경로가 꺼져 있다 (/trail on)', text: '학습 경로가 꺼져 있다 (/trail on)' }
+      }
       const cur = currentOf(all)
 
       /** 그 주제를 지금 주제로 세우고 저장할 모양을 만든다 */
@@ -495,7 +513,11 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column">
           <Text dimColor>아직 목차가 없습니다.</Text>
-          <Text dimColor>설명이 여러 갈래로 나뉠 때 자동으로 채워집니다.</Text>
+          {all.on ? (
+            <Text dimColor>설명이 여러 갈래로 나뉠 때 자동으로 채워집니다.</Text>
+          ) : (
+            <Text dimColor>/trail on 하면 설명이 쌓이기 시작합니다.</Text>
+          )}
         </Box>
       )
     }
@@ -523,6 +545,9 @@ export const register: Register = on => {
               <Button
                 key="fold"
                 plain
+                // 0 번이 접기다. 항목 번호(1~9) 바로 앞자리라 손이 기억한다.
+                // Tab 으로 이 줄에 와서 Enter 를 쳐도 같다
+                hotkey="0"
                 label={`${folded ? '▸' : '▾'} ${cur.no}. ${cur.title}`}
                 onPress={async () => {
                   const now = await read($, trails)
@@ -563,8 +588,8 @@ export const register: Register = on => {
                         ...now,
                         byTopic: { ...now.byTopic, [String(t.no)]: touch({ ...t, cursor: i }) },
                       })
-                      // 본문은 대화로만 나간다. 패널에서 띄울 길이 없어 명령을 알려 준다
-                      void $.ui.toast(`/recall ${t.no}.${i + 1}`).catch(() => {})
+                      // 본문은 /recall 로 받는다. 누르는 것은 자리를 옮기는 일까지다 —
+                      // 알림으로 명령을 되뇌어 줘도 읽는 사이에 사라져서 쓸모가 없었다
                     }}
                   />
                 )
@@ -640,10 +665,11 @@ export const register: Register = on => {
         {/* 쓸 수 있는 말을 상자에 모은다. 목차 줄들과 섞여 흐르면 안내인지 항목인지
             구분이 안 된다 — 테두리가 그 경계를 긋는다 */}
         <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1} marginTop={1}>
-          <Text dimColor>{'/recall 1.2   1번 주제 2번 설명을 대화로'}</Text>
-          <Text dimColor>{'/recall 2     지금 주제의 2번'}</Text>
-          <Text dimColor>{'/trail drop 1 1번 주제 지우기'}</Text>
-          <Text dimColor>{'ctrl+x tab    패널 안에서 숫자키로 이동'}</Text>
+          <Text dimColor>{all.on ? '쌓는 중 — 끄려면  /trail off' : '꺼짐 — 켜려면  /trail on'}</Text>
+          <Text dimColor>{'설명을 대화로 받기   /recall 1.2'}</Text>
+          <Text dimColor>{'주제 지우기          /trail drop 1'}</Text>
+          <Text dimColor>{'이 패널로 들어오기   ctrl+x 누르고 tab'}</Text>
+          <Text dimColor>{'  들어와서  1~9  그 항목으로   0  접기'}</Text>
         </Box>
       </Box>
     )

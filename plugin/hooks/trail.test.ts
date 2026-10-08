@@ -1,4 +1,4 @@
-import { test, expect } from 'claude-code/testing'
+import { test, expect, mock } from 'claude-code/testing'
 
 const TOOL = 'mcp__learn-trail__trail'
 
@@ -90,3 +90,7 @@ test('되감기를 연달아 불러도 계속 답한다', async $ => {
     expect(res.text).toContain('첫째 본문')
   }
 })
+
+// 패널 버튼을 눌러 보는 테스트는 넣지 못했다. 하네스에서 mount 가 이 mod 의 Pane 훅을
+// 집지 못해 바닥이 대신 그려진다(no Button keyed "item-1"). 버튼 경로는 사람이 눌러서 본다 —
+// 되감기 본문은 recallText 하나에서 나오므로, 위 테스트가 그 글 자체는 지키고 있다.

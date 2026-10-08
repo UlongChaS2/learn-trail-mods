@@ -34,6 +34,25 @@ const startTrail = (title: string, items: string[]): Trail => ({
   branches: [],
 })
 
+/**
+ * 되감아 보여 줄 글. 명령으로 부르든 패널에서 누르든 같은 글이어야 한다.
+ *
+ * <p>번호가 범위 밖이면 1번으로 떨어뜨린다. 목차는 있는데 커서가 없다고 아무것도 안
+ * 보여 주는 것보다, 첫 항목이라도 보여 주는 쪽이 쓸모 있다.
+ */
+const recallText = (t: Trail, at?: number): string => {
+  if (!t || !Array.isArray(t.items) || t.items.length === 0) {
+    return '목차가 비어 있습니다. 설명을 먼저 들어야 되감을 것이 생깁니다.'
+  }
+  const want = at ?? t.cursor
+  const i = want >= 0 && want < t.items.length ? want : 0
+  const head = `${i + 1}. ${t.items[i]}`
+  const saved = t.notes?.[String(i)]
+  return saved
+    ? `${head}\n\n${saved}`
+    : `${head}\n\n(이 항목은 아직 설명이 저장되지 않았습니다.)`
+}
+
 /** 지금 항목을 끝낸 것으로 치고 다음으로 — 곁가지가 남아 있으면 옮기지 않는다 */
 const advance = (t: Trail): Trail => {
   if (t.cursor < 0) return t
@@ -161,27 +180,10 @@ export const register: Register = on => {
    * 안전장치가 고장의 원인이었다.
    */
   on('command.run', { command: 'trail-recall' }, async $ => {
-    let stage = '시작'
     try {
-      stage = '상태 읽기'
-      const t = await read($, trail)
-
-      stage = '항목 고르기'
-      if (!t || !Array.isArray(t.items) || t.items.length === 0) {
-        return { text: '목차가 비어 있습니다. 설명을 먼저 들어야 되감을 것이 생깁니다.' }
-      }
-      const i = t.cursor >= 0 && t.cursor < t.items.length ? t.cursor : 0
-
-      stage = '본문 꺼내기'
-      const saved = t.notes?.[String(i)]
-      const head = `${i + 1}. ${t.items[i]}`
-      return {
-        text: saved
-          ? `${head}\n\n${saved}`
-          : `${head}\n\n(이 항목은 아직 설명이 저장되지 않았습니다.)`,
-      }
+      return { text: recallText(await read($, trail)) }
     } catch (err) {
-      return { text: `되감기가 "${stage}" 에서 멈췄습니다 — ${String(err)}` }
+      return { text: `되감기 실패 — ${String(err)}` }
     }
   })
 
@@ -311,8 +313,20 @@ export const register: Register = on => {
                 onPress={async () => {
                   const cur = await read($, trail)
                   await save($, { ...cur, cursor: i })
-                  // 패널은 좁다. 설명 본문은 대화로 돌려준다
-                  await $.command.run({ command: 'trail-recall' }).catch(() => {})
+                  // 패널은 좁다. 설명 본문은 대화로 돌려준다.
+                  //
+                  // $.command.run 으로는 안 된다 — 명령을 돌리고 결과를 이 자리로
+                  // 돌려줄 뿐, 대화에 찍지는 않는다. 사람이 직접 /trail-recall 을
+                  // 칠 때 글이 보이는 것은 엔진이 찍어 주기 때문이다.
+                  // 그래서 행을 직접 넣는다. system 행이라 모델 문맥은 더럽히지 않는다
+                  await $.session
+                    .append({
+                      message: {
+                        type: 'system',
+                        content: [{ type: 'text', text: recallText(cur, i) }],
+                      },
+                    })
+                    .catch(() => {})
                 }}
               />
               {/* 요약은 지금 항목만 펼친다. 다 펼치면 목차가 안 보인다 —

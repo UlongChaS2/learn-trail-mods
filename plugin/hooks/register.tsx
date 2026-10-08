@@ -288,7 +288,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text, Select } = $.ui.resolve(e)
     const t = await read($, trail)
 
     if (t.items.length === 0) {
@@ -303,52 +303,44 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         {t.title !== '' && <Text bold>{t.title}</Text>}
-        {t.items.map((item, i) => {
-          const isNow = i === t.cursor
-          const isDone = t.done.includes(i)
-          const note = t.notes[String(i)]
-          // 끝낸 것 · 지금 · 아직 — 세 상태가 한눈에 갈려야 한다
-          const mark = isDone ? '✓' : isNow ? '▸' : ' '
-          // 숫자 단축키는 1~9 까지만. 그 뒤 항목은 Tab 으로 간다
-          const hotkey = i < 9 ? String(i + 1) : undefined
-          return (
-            <Box flexDirection="column">
-              <Button
-                key={`item-${i}`}
-                hotkey={hotkey}
-                plain
-                dimColor={isDone && !isNow}
-                label={`${mark} ${item}${isNow ? '   ← 지금' : !isNow && note ? '  ●' : ''}`}
-                onPress={async () => {
-                  const cur = await read($, trail)
-                  await save($, { ...cur, cursor: i })
-                  // 패널은 좁다. 설명 본문은 대화로 돌려준다.
-                  //
-                  // $.command.run 으로는 안 된다 — 명령을 돌리고 결과를 이 자리로
-                  // 돌려줄 뿐, 대화에 찍지는 않는다. 사람이 직접 /trail-recall 을
-                  // 칠 때 글이 보이는 것은 엔진이 찍어 주기 때문이다.
-                  // 그래서 행을 직접 넣는다. system 행이라 모델 문맥은 더럽히지 않는다
-                  await $.session
-                    .append({
-                      message: {
-                        type: 'system',
-                        content: [{ type: 'text', text: recallText(cur, i) }],
-                      },
-                    })
-                    .catch(() => {})
-                }}
-              />
-              {/* 요약은 지금 항목만 펼친다. 다 펼치면 목차가 안 보인다 —
-                  다른 항목은 점(●)으로 "요약 있음"만 알린다 */}
-              {isNow && note && (
-                <Text dimColor>{`    ${note.split('\n')[0].slice(0, 60)}…`}</Text>
-              )}
-            </Box>
-          )
-        })}
+
+        {/* Select 하나로 목록을 그린다. 화살표로 옮기고 Enter 로 고른다 —
+            Button 을 줄줄이 놓으면 Tab 으로 하나씩 넘어가야 해서 손이 많이 간다.
+            고른 자리에서 Enter 를 다시 치면 같은 항목이 또 뜬다 */}
+        <Select
+          key="items"
+          autoFocus
+          value={String(t.cursor >= 0 ? t.cursor : 0)}
+          options={t.items.map((item, i) => ({
+            value: String(i),
+            // 끝낸 것 · 지금 · 아직 — 세 상태가 한눈에 갈려야 한다.
+            // 점(●)은 "설명이 저장돼 있다", 즉 눌러서 볼 것이 있다는 표시다
+            label: `${t.done.includes(i) ? '✓' : i === t.cursor ? '▸' : ' '} ${i + 1} ${item}${
+              t.notes?.[String(i)] ? '  ●' : ''
+            }`,
+          }))}
+          onSelect={async value => {
+            const i = Number.parseInt(value, 10)
+            const cur = await read($, trail)
+            await save($, { ...cur, cursor: i })
+            // 패널은 좁다. 본문은 대화로 돌려준다.
+            // $.command.run 으로는 안 된다 — 명령을 돌리고 결과를 이 자리로 돌려줄 뿐
+            // 대화에 찍지는 않는다. system 행이라 모델 문맥은 더럽히지 않는다
+            await $.session
+              .append({
+                message: {
+                  type: 'system',
+                  content: [{ type: 'text', text: recallText(cur, i) }],
+                },
+              })
+              .catch(() => {})
+          }}
+        />
+
         <Box paddingTop={1}>
-          <Text dimColor>{'/r 2  ← 2번 설명 다시 보기'}</Text>
+          <Text dimColor>{'↑↓ 고르고 Enter → 그 설명이 대화에 다시 뜸'}</Text>
         </Box>
+
         {t.branches.length > 0 && (
           <Box flexDirection="column" paddingTop={1}>
             <Text dimColor>곁가지 (답하면 위로 돌아감)</Text>

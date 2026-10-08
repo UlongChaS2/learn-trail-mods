@@ -1,0 +1,5 @@
+{
+  "name": "learn-trail",
+  "owner": { "name": "jaces2" },
+  "plugins": [{ "name": "learn-trail", "source": "./" }]
+}

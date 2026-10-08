@@ -73,3 +73,20 @@ test('note 로 저장한 본문이 되감기에서 그대로 나온다', async $
   // 실패하면 .catch 가 사유를 글로 돌려준다
   expect(res.text).not.toContain('되감기 실패')
 })
+
+/**
+ * 두 번 불러도 된다.
+ *
+ * 2026-10-08: 첫 호출만 되고 그 뒤로 전부 "아무도 답하지 않았다" 였다. 받는 곳 없는
+ * 거절(Promise.race 에 남은 타이머)이 플러그인 환경을 죽인 탓이다. 한 번 되는 것으로는
+ * 모자라다 — 이어서 부르는 것까지 본다.
+ */
+test('되감기를 연달아 불러도 계속 답한다', async $ => {
+  await $.tool.call({ tool: TOOL, action: 'set', title: 'x', items: ['하나', '둘'] })
+  await $.tool.call({ tool: TOOL, action: 'note', index: 1, text: '첫째 본문' })
+
+  for (let n = 0; n < 3; n++) {
+    const res = await $.command.run({ command: 'trail-recall' })
+    expect(res.text).toContain('첫째 본문')
+  }
+})

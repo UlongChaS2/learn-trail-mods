@@ -155,17 +155,16 @@ export const register: Register = on => {
    * 응답이 아예 안 돌아오면(시간 초과) 엔진은 "아무도 답하지 않았다"고만 말하고 끝난다 —
    * 2026-10-08 에 그 상태로 한참 헤맸다. 어디까지 갔는지를 글로 돌려줘야 알 수 있다.
    *
-   * <p>상태 읽기에 2초 상한을 둔다. 읽기가 안 돌아와도 적어도 "읽다가 멈췄다"는 말은 나온다.
+   * <p>타이머로 상한을 거는 짓은 하지 않는다. Promise.race 로 걸면 읽기가 이겼을 때
+   * 타이머가 남아 2초 뒤에 혼자 거절하고, 받는 곳이 없는 거절 하나가 플러그인 환경을
+   * 통째로 죽인다. 첫 호출만 되고 그 뒤로 전부 "아무도 답하지 않았다" 가 됐던 원인이다.
+   * 안전장치가 고장의 원인이었다.
    */
   on('command.run', { command: 'trail-recall' }, async $ => {
     let stage = '시작'
     try {
       stage = '상태 읽기'
-      const t = await Promise.race([
-        read($, trail),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('2초 안에 안 돌아옴')), 2000)),
-      ])
+      const t = await read($, trail)
 
       stage = '항목 고르기'
       if (!t || !Array.isArray(t.items) || t.items.length === 0) {

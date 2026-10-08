@@ -1,5 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 
+import { migrate } from './register'
+
 const TOOL = 'mcp__learn-trail__trail'
 
 // 본문은 모델이 쓴 답을 session.append(door='response') 에서 주워 담는다. 테스트
@@ -183,4 +185,41 @@ test('/trail on 하면 쌓기 시작한다', async $ => {
 
   const still = await $.command.run({ command: 'recall', args: '1.1' })
   expect(still.text).toContain('Hikari 풀')
+})
+
+/**
+ * 옛 모양으로 저장돼 있던 것을 버리지 않는다.
+ *
+ * 주소를 이름에서 번호로 바꿀 때 쌓여 있던 것들이 "undefined." 로 찍히고 /recall 로도
+ * 안 불렸다. 쌓는 데 시간이 든 것들이라 번호를 매겨 끌어올린다.
+ *
+ * 저장소를 통째로 흉내 내는 대신 끌어올리는 함수만 본다 — 하네스에 $.store 가 없다.
+ */
+test('번호 없던 옛 주제에 번호를 매겨 살린다', async () => {
+  const old = {
+    on: false,
+    nextNo: 1,
+    collapsed: [],
+    kept: [],
+    current: 'hikari',
+    byTopic: {
+      hikari: {
+        title: 'Hikari 커넥션 풀',
+        slug: 'hikari',
+        items: ['왜 필요한가', '무엇을 하나'],
+        cursor: 1,
+        done: [0],
+        notes: { '1': '여기에 옛 본문이 들어 있다' },
+        branches: [],
+      },
+    },
+  }
+
+  const now = migrate(old as never)
+
+  expect(now.byTopic['1'].no).toBe(1)
+  expect(now.current).toBe('1')
+  expect(now.byTopic['1'].notes['1']).toContain('옛 본문')
+  // 손댄 때가 없던 것을 바로 "묵었다" 고 묻지 않는다
+  expect(typeof now.byTopic['1'].touchedAt).toBe('number')
 })

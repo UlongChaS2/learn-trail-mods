@@ -39,6 +39,33 @@ const save = async ($: Parameters<typeof read>[0], next: Trails) => {
   await $.store.set(STORE_KEY, next).catch(() => {})
 }
 
+/**
+ * 옛 모양으로 저장된 것을 지금 모양으로 끌어올린다.
+ *
+ * 주소를 이름(slug)에서 번호로 바꿨다. 그때 저장돼 있던 것은 번호가 없어 패널에
+ * "undefined." 로 찍히고 /recall 로도 못 부른다. 쌓는 데 시간이 걸린 것들이라
+ * 버리지 않고 번호를 매겨 준다 — 쌓인 것을 지키는 게 이 mod 의 일이다.
+ */
+export const migrate = (all: Trails): Trails => {
+  if (Object.values(all.byTopic).every(t => typeof t.no === 'number')) return all
+
+  let no = all.nextNo > 1 ? all.nextNo : 1
+  const byTopic: Record<string, Trail> = {}
+  let current = ''
+  for (const [key, t] of Object.entries(all.byTopic)) {
+    const assigned = typeof t.no === 'number' ? t.no : no++
+    byTopic[String(assigned)] = {
+      ...t,
+      no: assigned,
+      slug: t.slug ?? '',
+      // 옛것에는 손댄 때가 없다. 지금으로 치면 바로 "묵었다" 고 묻지 않는다
+      touchedAt: typeof t.touchedAt === 'number' ? t.touchedAt : Date.now(),
+    }
+    if (key === all.current) current = String(assigned)
+  }
+  return { ...all, byTopic, current: current || (Object.keys(byTopic)[0] ?? ''), nextNo: no }
+}
+
 /** 지금 보고 있는 주제. 없으면 undefined */
 const currentOf = (all: Trails): Trail | undefined => all.byTopic[all.current]
 
@@ -136,7 +163,7 @@ export const register: Register = on => {
     try {
       const saved = (await $.store.get(STORE_KEY)) as Trails | undefined
       if (saved && saved.byTopic) {
-        await update($, trails, () => ({ ...EMPTY, ...saved }))
+        await update($, trails, () => migrate({ ...EMPTY, ...saved }))
       }
     } catch {
       // 복원 실패는 조용히 넘긴다 — 빈 목차로 시작하면 된다

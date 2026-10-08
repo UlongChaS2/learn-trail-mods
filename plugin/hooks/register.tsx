@@ -156,9 +156,9 @@ export const register: Register = on => {
         properties: {
           action: {
             type: 'string',
-            enum: ['set', 'focus', 'next', 'note', 'push', 'pop', 'clear'],
+            enum: ['set', 'focus', 'next', 'push', 'pop', 'clear'],
             description:
-              'set=목차 깔기, focus=항목으로 이동, next=다음 항목, note=항목에 본문 저장, push=곁가지 추가, pop=곁가지 닫기, clear=지금 주제 지우기',
+              'set=목차 깔기, focus=항목으로 이동, next=다음 항목, push=곁가지 추가, pop=곁가지 닫기, clear=지금 주제 지우기',
           },
           title: { type: 'string', description: 'set 일 때 설명 전체 제목' },
           items: {
@@ -166,13 +166,8 @@ export const register: Register = on => {
             items: { type: 'string' },
             description: 'set 일 때 목차 항목들 (순서가 번호)',
           },
-          index: { type: 'number', description: 'focus·note 일 때 항목 번호 (1부터)' },
+          index: { type: 'number', description: 'focus 일 때 항목 번호 (1부터)' },
           label: { type: 'string', description: 'push 일 때 곁가지 질문 한 줄' },
-          text: {
-            type: 'string',
-            description:
-              'note 일 때 그 항목의 설명 본문. 요약하지 말고 방금 쓴 글을 그대로 넣는다 — 사람이 번호를 부르면 이 글이 그대로 다시 뜬다',
-          },
         },
         required: ['action'],
       },
@@ -199,9 +194,9 @@ export const register: Register = on => {
           scope: 'session' as const,
           text: [
             '설명을 여러 항목으로 나눠 답할 때는 trail 도구를 함께 쓴다.',
-            'set 으로 목차를 깔고, focus 로 항목을 옮기고, 한 항목을 다 쓴 뒤 note 에',
-            '그 글을 그대로 담는다(요약이 아니라 방금 쓴 본문). 사람이 나중에 그 번호를',
-            '부르면 이 글이 다시 나온다. 곁가지로 빠질 때는 push, 돌아올 때는 pop.',
+            'set 으로 목차를 깔고, 항목을 옮길 때마다 focus 를 부른다.',
+            '설명 본문은 따로 넘기지 않는다 — 쓴 글은 자동으로 그 항목에 붙는다.',
+            '곁가지로 빠질 때는 push, 돌아올 때는 pop.',
             '한 갈래로 끝나는 짧은 답에는 쓰지 않는다.',
           ].join('\n'),
         },
@@ -215,6 +210,50 @@ export const register: Register = on => {
    * `/trail` · `/trail drop 2` · `/trail drop all`. 지우는 길이 패널의 ✕ 뿐이면
    * 묵지 않은 주제는 버릴 수가 없다 — 끝난 주제는 바로 버리고 싶을 때가 있다.
    */
+  /**
+   * 모델이 쓴 답을 지금 항목의 본문으로 담는다.
+   *
+   * 처음에는 도구의 `note` 로 받았다. 모델이 방금 쓴 글을 도구 인자에 통째로 다시 적는
+   * 방식인데, 길이가 길어지면 응답이 안전 분류기에 걸려 통째로 끊겼다(2026-10-08,
+   * `[reasoning_extraction]`). 같은 글을 두 번 쓰게 하는 설계부터 잘못이었다.
+   *
+   * 답이 대화에 들어오는 길목에서 그대로 주워 담는다. 모델은 아무것도 더 쓰지 않는다.
+   */
+  on('session.append', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      // 모델이 쓴 답만. 사람의 말·도구 결과·알림은 본문이 아니다
+      if (e.door !== 'response') return result
+
+      const text = (e.message?.content ?? [])
+        .filter((b: { type?: string }) => b?.type === 'text')
+        .map((b: { text?: string }) => b.text ?? '')
+        .join('\n')
+        .trim()
+      // 한두 줄짜리 맞장구는 본문이 아니다
+      if (text.length < 120) return result
+
+      const all = await read($, trails)
+      const cur = currentOf(all)
+      if (!cur || cur.cursor < 0) return result
+
+      // 한 항목에 여러 번 답할 수 있다. 마지막 것이 가장 다듬어진 글이다
+      await save($, {
+        ...all,
+        byTopic: {
+          ...all.byTopic,
+          [String(cur.no)]: touch({
+            ...cur,
+            notes: { ...cur.notes, [String(cur.cursor)]: text },
+          }),
+        },
+      })
+    } catch {
+      // 본문을 못 담아도 대화는 그대로 간다
+    }
+    return result
+  })
+
   on('command.run', { command: 'trail' }, async ($, e) => {
     const words = (e.args ?? '').trim().split(/\s+/).filter(Boolean)
 

@@ -536,32 +536,38 @@ export const register: Register = on => {
 
     const folded = cur ? all.collapsed.includes(String(cur.no)) : false
 
+    /** 접거나 편다 */
+    const fold = async (key: string) => {
+      const now = await read($, trails)
+      const was = now.collapsed.includes(key)
+      await save($, {
+        ...now,
+        collapsed: was ? now.collapsed.filter(k => k !== key) : [...now.collapsed, key],
+      })
+    }
+
     return (
       <Box flexDirection="column">
         {cur && (
           <Box flexDirection="column">
-            {/* 제목 줄이 곧 접기 단추다. 따로 두면 좁은 패널에서 줄만 더 먹는다 */}
+            {/* 주제 줄만 오갈 수 있다. 항목은 글로 둔다 — 눌러 봐야 본문을 띄울 길이
+                없으니(버튼에서 대화에 글을 넣지 못한다) 단추로 두면 눌러도 아무 일이
+                없는 줄이 아홉 개 생긴다. 본문은 /recall 로 받는다 */}
             <Box>
               <Button
-                key="fold"
+                key={`fold-${cur.no}`}
                 plain
-                // 0 번이 접기다. 항목 번호(1~9) 바로 앞자리라 손이 기억한다.
-                // Tab 으로 이 줄에 와서 Enter 를 쳐도 같다
-                hotkey="0"
+                autoFocus
                 label={`${folded ? '▸' : '▾'} ${cur.no}. ${cur.title}`}
-                onPress={async () => {
-                  const now = await read($, trails)
-                  const key = String(cur.no)
-                  const was = now.collapsed.includes(key)
-                  await save($, {
-                    ...now,
-                    collapsed: was
-                      ? now.collapsed.filter(s2 => s2 !== key)
-                      : [...now.collapsed, key],
-                  })
-                }}
+                onPress={() => fold(String(cur.no))}
               />
-              <Button key="drop-cur" plain dimColor label="  ✕" onPress={() => drop(String(cur.no))} />
+              <Button
+                key={`x-${cur.no}`}
+                plain
+                dimColor
+                label="  ✕"
+                onPress={() => drop(String(cur.no))}
+              />
             </Box>
 
             {!folded &&
@@ -572,26 +578,9 @@ export const register: Register = on => {
                 // 점(●)은 "본문이 저장돼 있다" — /recall 로 꺼낼 것이 있다는 표시다
                 const dot = cur.notes?.[String(i)] ? '  ●' : ''
                 return (
-                  <Button
-                    key={`item-${i}`}
-                    // 1~9 까지. 열 번째부터는 목차가 너무 긴 것이고, 쪼갤 단위가 틀린 신호다
-                    hotkey={i < 9 ? String(i + 1) : undefined}
-                    plain
-                    dimColor={isDone && !isNow}
-                    // 번호를 주소 그대로 적는다. 패널에서 읽어 치면 된다
-                    label={`${mark} ${cur.no}.${i + 1} ${item}${dot}${isNow ? '  ← 지금' : ''}`}
-                    onPress={async () => {
-                      const now = await read($, trails)
-                      const t = currentOf(now)
-                      if (!t) return
-                      await save($, {
-                        ...now,
-                        byTopic: { ...now.byTopic, [String(t.no)]: touch({ ...t, cursor: i }) },
-                      })
-                      // 본문은 /recall 로 받는다. 누르는 것은 자리를 옮기는 일까지다 —
-                      // 알림으로 명령을 되뇌어 줘도 읽는 사이에 사라져서 쓸모가 없었다
-                    }}
-                  />
+                  <Text dimColor={isDone && !isNow}>
+                    {`${mark} ${cur.no}.${i + 1} ${item}${dot}${isNow ? '  ← 지금' : ''}`}
+                  </Text>
                 )
               })}
 
@@ -599,7 +588,7 @@ export const register: Register = on => {
               <Box flexDirection="column" paddingTop={1}>
                 <Text dimColor>곁가지 (답하면 위로 돌아감)</Text>
                 {cur.branches.map((b, i) => (
-                  <Text>{`${'  '.repeat(i)}└ ${b}`}</Text>
+                  <Text dimColor>{`${'  '.repeat(i)}└ ${b}`}</Text>
                 ))}
               </Box>
             )}
@@ -612,7 +601,7 @@ export const register: Register = on => {
           <Box flexDirection="column" paddingTop={1}>
             <Text dimColor>{`${STALE_DAYS}일 넘게 안 본 주제 — 지울까요?`}</Text>
             {stale.map(t => (
-              <Box>
+              <Box key={`stale-${t.no}`}>
                 <Button
                   key={`drop-${t.no}`}
                   plain
@@ -634,8 +623,8 @@ export const register: Register = on => {
           </Box>
         )}
 
-        {/* 지금 주제와 같은 모양으로 세운다 — 접힘 표시(▸)와 번호와 제목, 끝에 ✕.
-            다르게 생기면 "주석" 처럼 읽혀서 눌러도 되는 줄인지 모른다. 색만 죽인다 */}
+        {/* 지금 주제와 같은 모양으로 세운다 — 다르게 생기면 "주석" 처럼 읽혀서
+            눌러도 되는 줄인지 모른다. 색만 죽인다. 누르면 그 주제가 열린다 */}
         {others.length > 0 && (
           <Box flexDirection="column" paddingTop={1}>
             {others.map(t => (
@@ -651,7 +640,7 @@ export const register: Register = on => {
                   }}
                 />
                 <Button
-                  key={`x-${t.no}`}
+                  key={`gx-${t.no}`}
                   plain
                   dimColor
                   label="  ✕"
@@ -669,7 +658,7 @@ export const register: Register = on => {
           <Text dimColor>{'설명을 대화로 받기   /recall 1.2'}</Text>
           <Text dimColor>{'주제 지우기          /trail drop 1'}</Text>
           <Text dimColor>{'이 패널로 들어오기   ctrl+x 누르고 tab'}</Text>
-          <Text dimColor>{'  들어와서  1~9  그 항목으로   0  접기'}</Text>
+          <Text dimColor>{'  주제 줄에서 Enter   접기 · 펴기 · 주제 바꾸기'}</Text>
         </Box>
       </Box>
     )

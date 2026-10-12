@@ -152,7 +152,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'trail',
-      description: '학습 경로 패널을 열고 쌓기 시작한다 (/trail off 로 그만, /trail drop N 으로 지움)',
+      description: '학습 경로 패널을 열고 쌓기 시작한다 (close 닫기 · off 그만 · drop N 지움)',
     })
     await $.command.register({
       name: 'recall',
@@ -286,6 +286,13 @@ export const register: Register = on => {
 
   on('command.run', { command: 'trail' }, async ($, e) => {
     const words = (e.args ?? '').trim().split(/\s+/).filter(Boolean)
+
+    // 패널만 닫는다. 쌓기는 그대로 — 화면이 좁을 때 치워 두는 것이지 그만두는 게 아니다.
+    // 그만두려면 /trail off. 둘을 한 명령에 묶으면 "잠깐 치우기" 를 할 수 없다
+    if (words[0] === 'close') {
+      await $.ui.close({ id: PANE }).catch(() => {})
+      return { text: '패널을 닫았습니다. 기록은 계속됩니다 (다시 열기 /trail · 그만 쌓기 /trail off).' }
+    }
 
     if (words[0] === 'off') {
       const all = await read($, trails)
@@ -686,6 +693,7 @@ export const register: Register = on => {
           <Text dimColor>{all.on ? '쌓는 중 — 그만하려면  /trail off' : '멈춤 — 다시 쌓으려면  /trail'}</Text>
           <Text dimColor>{'설명을 대화로 받기   /recall 1.2'}</Text>
           <Text dimColor>{'주제 지우기          /trail drop 1'}</Text>
+          <Text dimColor>{'패널 닫기            /trail close'}</Text>
           <Text dimColor>{'이 패널로 들어오기   ctrl+x 누르고 tab'}</Text>
           <Text dimColor>{'  주제 줄에서 Enter   접기 · 펴기 · 주제 바꾸기'}</Text>
         </Box>

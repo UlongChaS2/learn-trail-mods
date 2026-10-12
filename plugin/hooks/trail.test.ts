@@ -223,3 +223,15 @@ test('번호 없던 옛 주제에 번호를 매겨 살린다', async () => {
   // 손댄 때가 없던 것을 바로 "묵었다" 고 묻지 않는다
   expect(typeof now.byTopic['1'].touchedAt).toBe('number')
 })
+
+/** 닫기는 패널만 치운다 — 쌓기는 계속된다. 그만두는 것은 off 다 */
+test('/trail close 는 패널만 닫고 기록은 계속한다', async $ => {
+  await $.command.run({ command: 'trail' })
+
+  const closed = await $.command.run({ command: 'trail', args: 'close' })
+  expect(closed.text).toContain('닫았습니다')
+
+  // 닫은 뒤에도 목차가 쌓인다
+  const res = await $.tool.call({ tool: TOOL, action: 'set', title: 'After Close', items: ['가'] })
+  expect(res.text).toContain('목차 1개')
+})

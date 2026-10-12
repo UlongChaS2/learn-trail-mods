@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { Register } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
 
 import type { Trail, Trails } from '../types'
 
@@ -34,7 +34,7 @@ const trails = atom({ plugin: 'learn-trail', key: 'trails' } as const, EMPTY)
  * "나중에 다시 보기" 라서 그걸로는 반쪽이다(2026-10-08 실제로 날렸다). store 가 실패해도
  * 화면은 돌아가야 하므로 그쪽만 삼킨다.
  */
-const save = async ($: Parameters<typeof read>[0], next: Trails) => {
+const save = async ($: EngineInterface, next: Trails) => {
   await update($, trails, () => next)
   await $.store.set(STORE_KEY, next).catch(() => {})
 }
@@ -80,8 +80,9 @@ const parseArgs = (args: string): { topic?: string; name?: string; at?: number }
   for (const w of args.trim().split(/\s+/).filter(Boolean)) {
     const dotted = w.match(/^(\d+)\.(\d*)$/)
     if (dotted) {
-      out.topic = dotted[1]
-      if (dotted[2] !== '') out.at = Number.parseInt(dotted[2], 10) - 1
+      const [, topicNo = '', itemNo = ''] = dotted
+      out.topic = topicNo
+      if (itemNo !== '') out.at = Number.parseInt(itemNo, 10) - 1
       continue
     }
     if (/^\d+$/.test(w)) {
@@ -134,12 +135,33 @@ const advance = (t: Trail): Trail => {
   return { ...t, done, cursor: next < t.items.length ? next : -1 }
 }
 
-/** 오래 손 안 댔고 아직 "두기" 를 고르지 않은 주제들 */
-const staleOf = (all: Trails): Trail[] => {
-  const line = Date.now() - STALE_DAYS * DAY
+/**
+ * 오래 손 안 댔고 아직 "두기" 를 고르지 않은 주제들.
+ *
+ * 주제는 번호로 가리킨다(kept · current 둘 다 번호 문자열). 주소를 이름에서 번호로 바꿀 때
+ * 여기만 이름(slug)으로 비교하던 것이 남아, "두기" 를 눌러도 계속 묻고 지금 보는 주제까지
+ * 묵은 목록에 떴다.
+ */
+export const staleOf = (all: Trails, now: number = Date.now()): Trail[] => {
+  const line = now - STALE_DAYS * DAY
   return Object.values(all.byTopic).filter(
-    t => t.touchedAt < line && !all.kept.includes(t.slug) && t.slug !== all.current,
+    t => t.touchedAt < line && !all.kept.includes(String(t.no)) && String(t.no) !== all.current,
   )
+}
+
+/**
+ * 모델의 답을 지금 항목의 본문으로 담아도 되는가.
+ *
+ * 곁가지가 열려 있으면 담지 않는다. 그 답은 곁가지 질문에 대한 것이지 지금 항목의 설명이
+ * 아니다 — 담으면 원래 설명을 덮어써서, /recall 했을 때 엉뚱한 글이 나온다. 곁가지는
+ * 이 mod 를 만든 이유인데 곁가지를 쓰면 본문이 지워지는 셈이었다.
+ */
+export const captureTarget = (all: Trails): Trail | undefined => {
+  if (!all.on) return undefined
+  const cur = all.byTopic[all.current]
+  if (!cur || cur.cursor < 0) return undefined
+  if (cur.branches.length > 0) return undefined
+  return cur
 }
 
 /** 며칠 전인지 — 사람이 읽는 말로 */
@@ -156,7 +178,7 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'recall',
-      description: '지난 설명을 그대로 다시 본다 — /recall hikari 1 (주제는 생략 가능)',
+      description: '지난 설명을 그대로 다시 본다 — /recall 1.2 (패널에 찍힌 번호)',
     })
 
     // 지난 세션에서 쌓아 둔 것을 되살린다
@@ -253,19 +275,18 @@ export const register: Register = on => {
     try {
       // 모델이 쓴 답만. 사람의 말·도구 결과·알림은 본문이 아니다
       if (e.door !== 'response') return result
-      if (!(await read($, trails)).on) return result
 
       const text = (e.message?.content ?? [])
-        .filter((b: { type?: string }) => b?.type === 'text')
-        .map((b: { text?: string }) => b.text ?? '')
+        .map(b => (b.type === 'text' && typeof b.text === 'string' ? b.text : ''))
+        .filter(Boolean)
         .join('\n')
         .trim()
       // 한두 줄짜리 맞장구는 본문이 아니다
       if (text.length < 120) return result
 
       const all = await read($, trails)
-      const cur = currentOf(all)
-      if (!cur || cur.cursor < 0) return result
+      const cur = captureTarget(all)
+      if (!cur) return result
 
       // 한 항목에 여러 번 답할 수 있다. 마지막 것이 가장 다듬어진 글이다
       await save($, {
@@ -382,14 +403,20 @@ export const register: Register = on => {
 
     if (!t) return { text: '아직 들고 있는 주제가 없습니다.' }
 
-    // 부른 자리로 패널의 "지금" 도 옮긴다. 보여 준 것과 패널이 다르면 그게 더 헷갈린다
-    const i = at !== undefined && at >= 0 && at < t.items.length ? at : t.cursor
+    // 없는 번호면 그렇다고 말한다. 조용히 다른 항목을 보여 주면 그게 맞는 글인 줄 안다
+    if (at !== undefined && (at < 0 || at >= t.items.length)) {
+      return { text: `${t.no}번 주제에는 ${at + 1}번 항목이 없습니다 (1 ~ ${t.items.length}).` }
+    }
+
+    // 부른 자리로 패널의 "지금" 도 옮긴다. 보여 준 것과 패널이 다르면 그게 더 헷갈린다.
+    // 위치와 글은 같은 번호에서 나와야 한다
+    const i = at ?? t.cursor
     await save($, {
       ...all,
       current: String(t.no),
       byTopic: { ...all.byTopic, [String(t.no)]: touch({ ...t, cursor: i }) },
     })
-    return { text: recallText(t, at) }
+    return { text: recallText(t, i) }
   }).catch(($, e, next) => {
     if (next.called) return next(e)
     return { text: `다시 보기 실패 — ${String(next.error?.message ?? next.error)}` }
@@ -414,7 +441,7 @@ export const register: Register = on => {
     try {
       const all = await read($, trails)
       if (!all.on) {
-        return { result: '학습 경로가 꺼져 있다 (/trail on)', text: '학습 경로가 꺼져 있다 (/trail on)' }
+        return { result: '학습 경로가 꺼져 있다 (/trail 로 켠다)', text: '학습 경로가 꺼져 있다 (/trail 로 켠다)' }
       }
       const cur = currentOf(all)
 

@@ -4,6 +4,9 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Trail, Trails } from '../types'
 
 const PANE = 'learn-trail'
+
+/** 패널 안내 상자의 왼쪽(설명) 칸 폭. 가장 긴 "  주제 줄에서 Enter" 가 19칸이다 */
+const HELP_LABEL = 21
 const STORE_KEY = 'trails'
 
 /** 이 날수보다 오래 손 안 댄 주제는 켤 때 "지울까요" 하고 묻는다 */
@@ -912,15 +915,28 @@ export const register: Register = on => {
 
         {/* 쓸 수 있는 말을 상자에 모은다. 목차 줄들과 섞여 흐르면 안내인지 항목인지
             구분이 안 된다 — 테두리가 그 경계를 긋는다 */}
+        {/* 설명과 명령을 두 칸으로 나눈다. 공백으로 줄을 맞추면 한글·"—"·"·" 의 폭을
+            사람이 세야 하는데, 터미널마다 달라 어긋났다(2026-10-13). 왼쪽 칸 폭을 고정해
+            엔진이 재게 한다 */}
         <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1} marginTop={1}>
-          <Text dimColor>{all.on ? '쌓는 중 — 그만하려면  /trail off' : '멈춤 — 다시 쌓으려면  /trail'}</Text>
-          <Text dimColor>{'설명을 대화로 받기   /recall 1.2'}</Text>
-          <Text dimColor>{'  주제 전체          /recall 1'}</Text>
-          <Text dimColor>{'  여러 항목          /recall 1.1,3 · 1.2-4'}</Text>
-          <Text dimColor>{'주제 지우기          /trail drop 1'}</Text>
-          <Text dimColor>{'패널 닫기            /trail close'}</Text>
-          <Text dimColor>{'이 패널로 들어오기   ctrl+x 누르고 tab'}</Text>
-          <Text dimColor>{'  주제 줄에서 Enter   접기 · 펴기 · 주제 바꾸기'}</Text>
+          <Text dimColor>{all.on ? '쌓는 중' : '멈춤'}</Text>
+          {[
+            all.on ? ['그만 쌓기', '/trail off'] : ['다시 쌓기', '/trail'],
+            ['설명을 대화로 받기', '/recall 1.2'],
+            ['  주제 전체', '/recall 1'],
+            ['  여러 항목', '/recall 1.1,3  1.2-4'],
+            ['주제 지우기', '/trail drop 1'],
+            ['패널 닫기', '/trail close'],
+            ['이 패널로 들어오기', 'ctrl+x 누르고 tab'],
+            ['  주제 줄에서 Enter', '접기 · 펴기 · 주제 바꾸기'],
+          ].map(([label, how]) => (
+            <Box key={label} flexDirection="row">
+              <Box width={HELP_LABEL} flexShrink={0}>
+                <Text dimColor>{label}</Text>
+              </Box>
+              <Text dimColor>{how}</Text>
+            </Box>
+          ))}
         </Box>
       </Box>
     )

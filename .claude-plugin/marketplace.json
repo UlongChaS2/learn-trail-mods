@@ -1,6 +1,6 @@
 {
   "name": "learn-trail",
-  "description": "설명의 목차와 현재 위치를 패널에 띄우고, 지난 항목을 눌러 그때 설명을 그대로 다시 보는 mod",
-  "owner": { "name": "jaces2" },
+  "description": "설명의 목차와 현재 위치를 패널에 띄우고, 항목별 설명을 저장해 /recall 로 그대로 다시 보는 mod",
+  "owner": { "name": "UlongChaS2" },
   "plugins": [{ "name": "learn-trail", "source": "./plugin" }]
 }

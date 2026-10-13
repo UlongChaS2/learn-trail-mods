@@ -65,6 +65,6 @@ export type Trails = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'learn-trail': { trails: Trails }
+    'learn-trail': { trails: Trails; armed: boolean }
   }
 }

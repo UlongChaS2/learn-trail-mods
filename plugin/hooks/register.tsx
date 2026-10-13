@@ -4,6 +4,9 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Trail, Trails } from '../types'
 
 const PANE = 'learn-trail'
+
+/** 패널 안내 상자의 왼쪽(설명) 칸 폭. 가장 긴 "  주제 줄에서 Enter" 가 19칸이다 */
+const HELP_LABEL = 21
 const STORE_KEY = 'trails'
 
 /** 이 날수보다 오래 손 안 댄 주제는 켤 때 "지울까요" 하고 묻는다 */
@@ -26,6 +29,16 @@ const slugOf = (title: string): string => {
 }
 
 const trails = atom({ plugin: 'learn-trail', key: 'trails' } as const, EMPTY)
+
+/**
+ * 이번 턴에 모델이 trail 로 목차를 깔거나 항목을 옮겼는가 — 그래야 답을 본문으로 담는다.
+ *
+ * 사람이 말을 걸 때마다 내린다. 세션에만 두면 된다 — 턴을 넘어 남을 값이 아니다.
+ */
+const armed = atom({ plugin: 'learn-trail', key: 'armed' } as const, false)
+
+/** 도구를 이 중 하나로 부른 턴의 답만 본문이다 */
+const ARMING = ['set', 'focus', 'next']
 
 /**
  * state 와 store 양쪽에 쓴다.
@@ -90,26 +103,73 @@ export const without = (all: Trails, key: string): Trails => {
 const currentOf = (all: Trails): Trail | undefined => all.byTopic[all.current]
 
 /**
+ * 항목 번호 묶음을 읽는다 — `3` · `1,3,5` · `2-4` · `1,3-5`.
+ *
+ * @returns 0부터 센 번호를 오름차순·중복 없이. 읽을 수 없는 조각이 있으면 undefined —
+ *          읽히는 것만 골라 보여 주면 빠진 줄 모르고 그게 전부인 줄 안다
+ */
+export const parsePicks = (spec: string): number[] | undefined => {
+  const picks = new Set<number>()
+  for (const part of spec.split(',')) {
+    const one = part.match(/^(\d+)$/)
+    const range = part.match(/^(\d+)-(\d+)$/)
+    if (one) {
+      picks.add(Number.parseInt(one[1] ?? '', 10) - 1)
+    } else if (range) {
+      const from = Number.parseInt(range[1] ?? '', 10)
+      const to = Number.parseInt(range[2] ?? '', 10)
+      if (from > to) return undefined
+      for (let n = from; n <= to; n++) picks.add(n - 1)
+    } else {
+      return undefined
+    }
+  }
+  return [...picks].sort((a, b) => a - b)
+}
+
+type RecallArgs = { topic?: string; name?: string; picks?: number[]; bad?: string }
+
+/**
  * `/recall` 뒤에 적은 것을 읽는다.
  *
- * `2.3` 은 2번 주제의 3번, `2.` 는 2번 주제, `3` 은 지금 주제의 3번, `hikari` 는 이름으로
- * 찾기. 사람이 보는 번호는 1부터, 안에서는 0부터다.
+ * `2` 는 2번 주제 전체, `2.3` 은 2번 주제의 3번, `2.1,3` · `2.2-4` 는 여러 항목,
+ * `hikari` 는 이름으로 찾은 주제 전체, `hikari 3` 은 그 주제의 3번. 사람이 보는 번호는
+ * 1부터, 안에서는 0부터다.
+ *
+ * 맨 숫자 하나는 주제 번호다. 예전에는 "지금 주제의 항목" 이었는데, 패널에 `1.3` 처럼
+ * 주제.항목으로 찍히니 `/recall 3` 이 3번 주제인지 3번 항목인지 헷갈렸다(2026-10-13).
+ * 이름과 함께 오거나 `1,3` 처럼 묶음이면 항목이다 — 그때는 헷갈릴 게 없다.
  */
-const parseArgs = (args: string): { topic?: string; name?: string; at?: number } => {
-  const out: { topic?: string; name?: string; at?: number } = {}
+export const parseArgs = (args: string): RecallArgs => {
+  const out: RecallArgs = {}
+  let bare: string | undefined
+  let spec: string | undefined
   for (const w of args.trim().split(/\s+/).filter(Boolean)) {
-    const dotted = w.match(/^(\d+)\.(\d*)$/)
+    const dotted = w.match(/^(\d+)\.(.*)$/)
     if (dotted) {
-      const [, topicNo = '', itemNo = ''] = dotted
-      out.topic = topicNo
-      if (itemNo !== '') out.at = Number.parseInt(itemNo, 10) - 1
+      out.topic = dotted[1] ?? ''
+      if (dotted[2]) spec = dotted[2]
       continue
     }
     if (/^\d+$/.test(w)) {
-      out.at = Number.parseInt(w, 10) - 1
+      bare = w
+      continue
+    }
+    if (/^[\d,-]+$/.test(w)) {
+      spec = w
       continue
     }
     out.name = w.toLowerCase()
+  }
+
+  if (bare !== undefined) {
+    if (out.topic !== undefined || out.name !== undefined) spec = bare
+    else out.topic = bare
+  }
+  if (spec !== undefined) {
+    const picks = parsePicks(spec)
+    if (picks) out.picks = picks
+    else out.bad = spec
   }
   return out
 }
@@ -132,6 +192,24 @@ const recallText = (t: Trail | undefined, at?: number): string => {
   const head = `${t.title} — ${i + 1}. ${t.items[i]}`
   const saved = t.notes?.[String(i)]
   return saved ? `${head}\n\n${saved}` : `${head}\n\n(이 항목은 아직 설명이 저장되지 않았습니다.)`
+}
+
+/**
+ * 여러 항목을 한 번에 — `/recall 1` 이면 전체, `/recall 1.1,3` 이면 고른 것만.
+ *
+ * 번호는 이미 범위를 확인하고 들어온다. 저장 안 된 항목도 빼지 않고 그렇다고 적는다 —
+ * 빠져 있으면 원래 없던 항목인 줄 안다.
+ */
+const recallManyText = (t: Trail, picks: number[]): string => {
+  const whole = picks.length === t.items.length
+  const head = whole
+    ? `${t.title} — 전체 ${t.items.length}개`
+    : `${t.title} — ${picks.map(i => i + 1).join(', ')}번`
+  const parts = picks.map(i => {
+    const saved = t.notes?.[String(i)]
+    return `${i + 1}. ${t.items[i]}\n\n${saved || '(이 항목은 아직 설명이 저장되지 않았습니다.)'}`
+  })
+  return [head, ...parts].join('\n\n---\n\n')
 }
 
 /** 목차를 새로 깔면 그 주제의 진행 상태는 초기화된다 — 반쯤 남은 표시가 섞이면 더 헷갈린다 */
@@ -227,9 +305,13 @@ export const splitSections = (text: string, itemCount: number): Map<number, stri
  * 곁가지가 열려 있으면 담지 않는다. 그 답은 곁가지 질문에 대한 것이지 지금 항목의 설명이
  * 아니다 — 담으면 원래 설명을 덮어써서, /recall 했을 때 엉뚱한 글이 나온다. 곁가지는
  * 이 mod 를 만든 이유인데 곁가지를 쓰면 본문이 지워지는 셈이었다.
+ *
+ * 이번 턴에 도구를 안 불렀으면(`armed` 가 아니면) 담지 않는다. 그 답은 목차와 상관없는
+ * 대화다 — `/recall 1.1` 로 커서를 1번에 옮긴 뒤 다른 얘기를 하니, 그 답이 1번 본문을
+ * 덮어썼다(2026-10-13).
  */
-export const captureTarget = (all: Trails): Trail | undefined => {
-  if (!all.on) return undefined
+export const captureTarget = (all: Trails, armed: boolean): Trail | undefined => {
+  if (!all.on || !armed) return undefined
   const cur = all.byTopic[all.current]
   if (!cur || cur.cursor < 0) return undefined
   if (cur.branches.length > 0) return undefined
@@ -324,6 +406,8 @@ export const register: Register = on => {
             '4) 각 항목은 요약이 아니라 실제 설명을 쓴다. "정리했다" 같은 한 줄로 넘기지 않는다.',
             '5) 중간에 멈추고 "다음으로 넘어갈까요?" 묻지 않는다. 사람이 "다음" 이라고 해야 넘어가는 게 아니라',
             '   목차 끝까지 한 번에 이어서 쓴다. 더 파고들지는 사람이 다 읽고 정한다.',
+            '6) 이미 깐 목차의 한 항목을 다시·더 설명할 때는 focus 로 그 항목을 짚은 뒤 쓴다.',
+            '   trail 을 부르지 않은 턴의 답은 저장되지 않는다.',
             '사람이 중간에 다른 걸 물어 곁가지로 빠질 때는 push, 그 답을 마치면 pop 을 부른다.',
             '한 갈래로 끝나는 짧은 답에는 쓰지 않는다.',
           ].join('\n'),
@@ -350,8 +434,14 @@ export const register: Register = on => {
   on('session.append', async ($, e, next) => {
     const result = await next(e)
     try {
-      // 모델이 쓴 답만. 사람의 말·도구 결과·알림은 본문이 아니다
-      if (e.door !== 'response') return result
+      // 사람이 새로 말을 걸면 새 턴이다. 이 턴의 답은 도구를 다시 불러야 본문이 된다
+      if (e.door === 'prompt') {
+        await update($, armed, () => false)
+        return result
+      }
+      // 모델이 쓴 답만. 사람의 말·도구 결과·알림은 본문이 아니다.
+      // 하위 에이전트의 답도 아니다 — 그건 사람에게 한 설명이 아니다
+      if (e.door !== 'response' || e.agentId) return result
 
       const text = (e.message?.content ?? [])
         .map(b => (b.type === 'text' && typeof b.text === 'string' ? b.text : ''))
@@ -362,7 +452,7 @@ export const register: Register = on => {
       if (text.length < 120) return result
 
       const all = await read($, trails)
-      const cur = captureTarget(all)
+      const cur = captureTarget(all, await read($, armed))
       if (!cur) return result
 
       // 한 번에 쓴 답이면 머리말로 잘라 번호마다 담는다
@@ -471,7 +561,11 @@ export const register: Register = on => {
    */
   on('command.run', { command: 'recall' }, async ($, e) => {
     const all = await read($, trails)
-    const { topic, name, at } = parseArgs(e.args ?? '')
+    const { topic, name, picks, bad } = parseArgs(e.args ?? '')
+
+    if (bad !== undefined) {
+      return { text: `"${bad}" 은 읽을 수 없습니다. 예: /recall 1 · 1.2 · 1.1,3 · 1.2-4` }
+    }
 
     const list = () =>
       Object.values(all.byTopic)
@@ -503,13 +597,25 @@ export const register: Register = on => {
     if (!t) return { text: '아직 들고 있는 주제가 없습니다.' }
 
     // 없는 번호면 그렇다고 말한다. 조용히 다른 항목을 보여 주면 그게 맞는 글인 줄 안다
-    if (at !== undefined && (at < 0 || at >= t.items.length)) {
-      return { text: `${t.no}번 주제에는 ${at + 1}번 항목이 없습니다 (1 ~ ${t.items.length}).` }
+    const missing = (picks ?? []).filter(i => i < 0 || i >= t.items.length)
+    if (missing.length > 0) {
+      const nos = missing.map(i => i + 1).join(', ')
+      return { text: `${t.no}번 주제에는 ${nos}번 항목이 없습니다 (1 ~ ${t.items.length}).` }
+    }
+
+    // 주제만 짚으면 전체다. 아무것도 안 짚으면 지금 자리 하나
+    const named = topic !== undefined || name !== undefined
+    const want = picks ?? (named ? t.items.map((_, i) => i) : undefined)
+
+    // 여럿을 보여 줄 때는 패널의 "지금" 을 그대로 둔다. 어느 하나로 옮길 근거가 없다
+    if (want && want.length > 1) {
+      await save($, { ...all, current: String(t.no), byTopic: { ...all.byTopic, [String(t.no)]: touch(t) } })
+      return { text: recallManyText(t, want) }
     }
 
     // 부른 자리로 패널의 "지금" 도 옮긴다. 보여 준 것과 패널이 다르면 그게 더 헷갈린다.
     // 위치와 글은 같은 번호에서 나와야 한다
-    const i = at ?? t.cursor
+    const i = want?.[0] ?? t.cursor
     await save($, {
       ...all,
       current: String(t.no),
@@ -639,6 +745,9 @@ export const register: Register = on => {
           line = `모르는 action: ${input.action}`
         }
       }
+
+      // 목차를 깔거나 항목을 옮긴 턴이다 — 이 턴의 답은 그 항목의 본문이다
+      if (ARMING.includes(input.action ?? '')) await update($, armed, () => true)
     } catch (err) {
       line = `패널 갱신 실패 — ${String(err)}`
     }
@@ -806,13 +915,28 @@ export const register: Register = on => {
 
         {/* 쓸 수 있는 말을 상자에 모은다. 목차 줄들과 섞여 흐르면 안내인지 항목인지
             구분이 안 된다 — 테두리가 그 경계를 긋는다 */}
+        {/* 설명과 명령을 두 칸으로 나눈다. 공백으로 줄을 맞추면 한글·"—"·"·" 의 폭을
+            사람이 세야 하는데, 터미널마다 달라 어긋났다(2026-10-13). 왼쪽 칸 폭을 고정해
+            엔진이 재게 한다 */}
         <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1} marginTop={1}>
-          <Text dimColor>{all.on ? '쌓는 중 — 그만하려면  /trail off' : '멈춤 — 다시 쌓으려면  /trail'}</Text>
-          <Text dimColor>{'설명을 대화로 받기   /recall 1.2'}</Text>
-          <Text dimColor>{'주제 지우기          /trail drop 1'}</Text>
-          <Text dimColor>{'패널 닫기            /trail close'}</Text>
-          <Text dimColor>{'이 패널로 들어오기   ctrl+x 누르고 tab'}</Text>
-          <Text dimColor>{'  주제 줄에서 Enter   접기 · 펴기 · 주제 바꾸기'}</Text>
+          <Text dimColor>{all.on ? '쌓는 중' : '멈춤'}</Text>
+          {[
+            all.on ? ['그만 쌓기', '/trail off'] : ['다시 쌓기', '/trail'],
+            ['설명을 대화로 받기', '/recall 1.2'],
+            ['  주제 전체', '/recall 1'],
+            ['  여러 항목', '/recall 1.1,3  1.2-4'],
+            ['주제 지우기', '/trail drop 1'],
+            ['패널 닫기', '/trail close'],
+            ['이 패널로 들어오기', 'ctrl+x 누르고 tab'],
+            ['  주제 줄에서 Enter', '접기 · 펴기 · 주제 바꾸기'],
+          ].map(([label, how]) => (
+            <Box key={label} flexDirection="row">
+              <Box width={HELP_LABEL} flexShrink={0}>
+                <Text dimColor>{label}</Text>
+              </Box>
+              <Text dimColor>{how}</Text>
+            </Box>
+          ))}
         </Box>
       </Box>
     )

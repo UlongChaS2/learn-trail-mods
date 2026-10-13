@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 
-import { captureTarget, migrate, splitSections, staleOf, without } from './register'
+import { captureTarget, migrate, parseArgs, parsePicks, splitSections, staleOf, without } from './register'
 
 const TOOL = 'mcp__learn-trail__trail'
 
@@ -307,16 +307,16 @@ test('곁가지가 열려 있으면 본문으로 담지 않는다', async () => 
   const base = { on: true, nextNo: 2, collapsed: [], current: '1', kept: [] }
 
   const plain = { ...base, byTopic: { '1': topic(1) } }
-  expect(captureTarget(plain as never)?.no).toBe(1)
+  expect(captureTarget(plain as never, true)?.no).toBe(1)
 
   const branching = { ...base, byTopic: { '1': topic(1, { branches: ['SqlSession 이 뭔지'] }) } }
-  expect(captureTarget(branching as never)).toBeUndefined()
+  expect(captureTarget(branching as never, true)).toBeUndefined()
 })
 
 test('꺼져 있거나 목차가 끝났으면 담지 않는다', async () => {
   const base = { nextNo: 2, collapsed: [], current: '1', kept: [] }
-  expect(captureTarget({ ...base, on: false, byTopic: { '1': topic(1) } } as never)).toBeUndefined()
-  expect(captureTarget({ ...base, on: true, byTopic: { '1': topic(1, { cursor: -1 }) } } as never)).toBeUndefined()
+  expect(captureTarget({ ...base, on: false, byTopic: { '1': topic(1) } } as never, true)).toBeUndefined()
+  expect(captureTarget({ ...base, on: true, byTopic: { '1': topic(1, { cursor: -1 }) } } as never, true)).toBeUndefined()
 })
 
 /** 꺼진 채로 모델이 도구를 불러도 아무것도 쌓지 않고, 켜는 법을 맞게 알려 준다 */
@@ -457,4 +457,88 @@ test('표시 없는 머리말만 있는 답도 나눈다', async () => {
   const parts = splitSections('1. 가\n본문 a\n2. 나\n본문 b', 8)
   expect([...parts.keys()]).toEqual([0, 1])
   expect(parts.get(1)).toContain('본문 b')
+})
+
+/**
+ * 도구를 안 부른 턴의 답은 본문이 아니다.
+ *
+ * 2026-10-13: `/recall 1.1` 로 커서가 1번에 간 뒤 recall 기능 얘기를 했더니, 그 답이
+ * 1번 본문("백엔드가 하는 일")을 덮어썼다.
+ */
+test('이번 턴에 trail 을 안 불렀으면 본문으로 담지 않는다', async () => {
+  const all = { on: true, nextNo: 2, collapsed: [], current: '1', kept: [], byTopic: { '1': topic(1) } }
+  expect(captureTarget(all as never, false)).toBeUndefined()
+  expect(captureTarget(all as never, true)?.no).toBe(1)
+})
+
+test('항목 번호 묶음을 읽는다', () => {
+  expect(parsePicks('3')).toEqual([2])
+  expect(parsePicks('1,3,5')).toEqual([0, 2, 4])
+  expect(parsePicks('2-4')).toEqual([1, 2, 3])
+  // 섞어 써도 되고, 겹치거나 순서가 뒤섞여도 한 번씩 차례대로
+  expect(parsePicks('5,1-3,2')).toEqual([0, 1, 2, 4])
+  // 못 읽는 조각이 있으면 통째로 못 읽는다 — 읽히는 것만 보여 주면 빠진 줄 모른다
+  expect(parsePicks('4-2')).toBeUndefined()
+  expect(parsePicks('1,,3')).toBeUndefined()
+  expect(parsePicks('1-')).toBeUndefined()
+})
+
+test('맨 숫자는 주제, 주제.묶음은 항목이다', () => {
+  expect(parseArgs('')).toEqual({})
+  expect(parseArgs('2')).toEqual({ topic: '2' })
+  expect(parseArgs('2.')).toEqual({ topic: '2' })
+  expect(parseArgs('2.3')).toEqual({ topic: '2', picks: [2] })
+  expect(parseArgs('2.1,3')).toEqual({ topic: '2', picks: [0, 2] })
+  expect(parseArgs('2.2-4')).toEqual({ topic: '2', picks: [1, 2, 3] })
+  // 이름과 함께 온 숫자는 그 주제의 항목이다
+  expect(parseArgs('vert 3')).toEqual({ name: 'vert', picks: [2] })
+  // 묶음만 오면 지금 주제의 항목이다 — 묶음은 주제 번호일 수 없으니 헷갈릴 게 없다
+  expect(parseArgs('1,3')).toEqual({ picks: [0, 2] })
+  expect(parseArgs('2.x')).toEqual({ topic: '2', bad: 'x' })
+})
+
+/** 본문을 깔아 둔 세 항목짜리 주제. 본문은 note 로 바로 넣는다 — 답을 줍는 문은 흉내 못 낸다 */
+const seeded = async ($: Parameters<Parameters<typeof test>[1]>[0]) => {
+  await run($, 'trail')
+  await $.tool.call({ tool: TOOL, action: 'set', title: 'Multi 주제', items: ['가', '나', '다'] })
+  await $.tool.call({ tool: TOOL, action: 'note', index: 1, text: '본문-가' } as never)
+  await $.tool.call({ tool: TOOL, action: 'note', index: 3, text: '본문-다' } as never)
+}
+
+test('/recall 주제번호 는 그 주제 전체를 보여 준다', async $ => {
+  await seeded($)
+  const res = await run($, 'recall', '1')
+  expect(res.text).toContain('전체 3개')
+  expect(res.text).toContain('본문-가')
+  expect(res.text).toContain('본문-다')
+  // 저장 안 된 항목도 빼지 않는다
+  expect(res.text).toContain('2. 나')
+  expect(res.text).toContain('아직 설명이 저장되지 않았습니다')
+})
+
+test('/recall 1.1,3 · 1.2-3 은 고른 항목만 보여 준다', async $ => {
+  await seeded($)
+  const list = await run($, 'recall', '1.1,3')
+  expect(list.text).toContain('1, 3번')
+  expect(list.text).toContain('본문-가')
+  expect(list.text).toContain('본문-다')
+  expect(list.text).not.toContain('2. 나')
+
+  const range = await run($, 'recall', '1.2-3')
+  expect(range.text).toContain('2, 3번')
+  expect(range.text).not.toContain('본문-가')
+})
+
+test('/recall 묶음에 없는 번호가 섞이면 무엇이 없는지 말한다', async $ => {
+  await seeded($)
+  const res = await run($, 'recall', '1.2,8,9')
+  expect(res.text).toContain('8, 9번 항목이 없습니다')
+  expect(res.text).toContain('1 ~ 3')
+})
+
+test('/recall 을 못 읽으면 쓰는 법을 알려 준다', async $ => {
+  await seeded($)
+  const res = await run($, 'recall', '1.3-1')
+  expect(res.text).toContain('읽을 수 없습니다')
+  expect(res.text).toContain('1.1,3')
 })

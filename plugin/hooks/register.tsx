@@ -66,6 +66,26 @@ export const migrate = (all: Trails): Trails => {
   return { ...all, byTopic, current: current || (Object.keys(byTopic)[0] ?? ''), nextNo: no }
 }
 
+/**
+ * 주제 하나를 뺀 상태. 하나도 안 남으면 번호를 1 로 되돌린다.
+ *
+ * 번호를 다시 쓰지 않는 건 남은 주제와 겹치지 않게 하려는 것이다. 남은 게 없으면 겹칠
+ * 것도 없다 — 다 지웠는데 다음 주제가 7번으로 시작하면 왜 7인지 묻게 된다(2026-10-13).
+ */
+export const without = (all: Trails, key: string): Trails => {
+  const rest = { ...all.byTopic }
+  delete rest[key]
+  const empty = Object.keys(rest).length === 0
+  return {
+    ...all,
+    byTopic: rest,
+    current: all.current === key ? (Object.keys(rest)[0] ?? '') : all.current,
+    nextNo: empty ? 1 : all.nextNo,
+    collapsed: all.collapsed.filter(k => k !== key),
+    kept: all.kept.filter(k => k !== key),
+  }
+}
+
 /** 지금 보고 있는 주제. 없으면 undefined */
 const currentOf = (all: Trails): Trail | undefined => all.byTopic[all.current]
 
@@ -147,6 +167,58 @@ export const staleOf = (all: Trails, now: number = Date.now()): Trail[] => {
   return Object.values(all.byTopic).filter(
     t => t.touchedAt < line && !all.kept.includes(String(t.no)) && String(t.no) !== all.current,
   )
+}
+
+/**
+ * 한 번에 쓴 답을 번호 머리말로 잘라 항목별 본문으로 나눈다.
+ *
+ * 처음에는 항목마다 도구(focus)를 부르게 했다. 그러면 답이 도구 호출 사이로 여덟 토막이
+ * 나고, 모델은 그 틈에 본문 대신 "~를 정리했어요, 다음으로 넘어갈게요" 한 줄만 남겼다
+ * (2026-10-13 실제 화면 — 1~7번이 전부 한 줄 요약, 8번만 본문). 설명이 화면에 안 남았다.
+ *
+ * 그래서 답은 한 번에 끝까지 쓰게 하고, 여기서 `## 1. …` · `**2. …**` · `3. …` 같은
+ * 머리말을 찾아 자른다. 머리말 줄부터 다음 머리말 직전까지가 그 항목의 본문이다.
+ * 목차 범위 밖 번호(본문 속 번호 매긴 목록 등)는 머리말로 치지 않는다.
+ *
+ * @returns 항목 번호(0부터) → 본문. 머리말을 둘 이상 못 찾으면 빈 맵이다 — 한 덩어리 답은
+ *          쪼갤 근거가 없으니 지금 항목 하나에 담는 쪽으로 돌린다
+ */
+export const splitSections = (text: string, itemCount: number): Map<number, string> => {
+  const lines = text.split('\n')
+
+  // 표시가 붙은 머리말("## 3." · "**3.**")을 먼저 믿는다. 표시 없는 "3." 는 본문 속 번호
+  // 목록과 구별이 안 된다 — "1. 정합성 / 2. 확장성" 같은 목록의 2 가 다음 항목 머리말 자리에
+  // 맞아 떨어지면 항목이 엉뚱하게 잘린다. 표시 있는 머리말이 없을 때만 맨 번호로 자른다
+  const marked = /^\s*(?:#{1,4}\s*(?:\*\*)?|\*\*)\s*(\d{1,2})[.)]\s+\S/
+  const plain = /^\s*(\d{1,2})[.)]\s+\S/
+
+  const find = (head: RegExp) => {
+    const starts: { line: number; idx: number }[] = []
+    let expect = 1
+    lines.forEach((line, n) => {
+      const m = line.match(head)
+      if (!m) return
+      const no = Number.parseInt(m[1] ?? '', 10)
+      // 머리말은 1, 2, 3 … 순서로 나온다. 순서를 벗어난 번호는 머리말이 아니다
+      if (no === expect && no <= itemCount) {
+        starts.push({ line: n, idx: no - 1 })
+        expect += 1
+      }
+    })
+    return starts
+  }
+
+  const markedStarts = find(marked)
+  const starts = markedStarts.length >= 2 ? markedStarts : find(plain)
+
+  const out = new Map<number, string>()
+  if (starts.length < 2) return out
+  starts.forEach((st, k) => {
+    const end = k + 1 < starts.length ? (starts[k + 1]?.line ?? lines.length) : lines.length
+    const body = lines.slice(st.line, end).join('\n').trim()
+    if (body !== '') out.set(st.idx, body)
+  })
+  return out
 }
 
 /**
@@ -244,10 +316,13 @@ export const register: Register = on => {
           id: 'learn-trail:guide',
           scope: 'session' as const,
           text: [
-            '설명을 여러 항목으로 나눠 답할 때는 trail 도구를 함께 쓴다.',
-            'set 으로 목차를 깔고, 항목을 옮길 때마다 focus 를 부른다.',
-            '설명 본문은 따로 넘기지 않는다 — 쓴 글은 자동으로 그 항목에 붙는다.',
-            '곁가지로 빠질 때는 push, 돌아올 때는 pop.',
+            '설명을 여러 항목으로 나눠 답할 때는 trail 도구로 목차를 남긴다.',
+            '1) 답을 쓰기 전에 trail 의 set 을 한 번 불러 목차를 깐다.',
+            '2) 그다음 답은 한 번에 끝까지 쓴다. 항목 사이에 도구를 부르지 않는다 —',
+            '   부르면 답이 토막 나 설명이 화면에 온전히 남지 않는다.',
+            '3) 각 항목은 "## 1. 제목" 처럼 번호 머리말로 시작한다. 그 머리말로 항목이 나뉘어 저장된다.',
+            '4) 각 항목은 요약이 아니라 실제 설명을 쓴다. "정리했다" 같은 한 줄로 넘기지 않는다.',
+            '사람이 중간에 다른 걸 물어 곁가지로 빠질 때는 push, 그 답을 마치면 pop 을 부른다.',
             '한 갈래로 끝나는 짧은 답에는 쓰지 않는다.',
           ].join('\n'),
         },
@@ -288,6 +363,32 @@ export const register: Register = on => {
       const cur = captureTarget(all)
       if (!cur) return result
 
+      // 한 번에 쓴 답이면 머리말로 잘라 번호마다 담는다
+      const sections = splitSections(text, cur.items.length)
+      if (sections.size >= 2) {
+        const notes = { ...cur.notes }
+        sections.forEach((body, idx) => {
+          notes[String(idx)] = body
+        })
+        const written = [...sections.keys()].sort((a, b) => a - b)
+        const last = written[written.length - 1] ?? cur.cursor
+        await save($, {
+          ...all,
+          byTopic: {
+            ...all.byTopic,
+            [String(cur.no)]: touch({
+              ...cur,
+              notes,
+              // 쓴 항목은 끝낸 것으로, 마지막으로 쓴 곳을 "지금" 으로 둔다
+              done: [...new Set([...cur.done, ...written.slice(0, -1)])],
+              cursor: last,
+            }),
+          },
+        })
+        return result
+      }
+
+      // 머리말이 없는 한 덩어리 답 — 지금 항목 하나에 담는다.
       // 한 항목에 여러 번 답할 수 있다. 마지막 것이 가장 다듬어진 글이다
       await save($, {
         ...all,
@@ -326,8 +427,10 @@ export const register: Register = on => {
       const what = words[1] ?? ''
 
       if (what === 'all') {
-        await save($, { ...EMPTY, nextNo: all.nextNo })
-        return { text: '주제를 전부 지웠습니다.' }
+        // 다 지웠으면 1번부터 다시 센다. 번호를 안 되살리는 건 남은 주제와 겹치지 않게
+        // 하려는 것인데, 남은 게 없으면 겹칠 것도 없다. 켜짐 상태는 그대로 둔다
+        await save($, { ...EMPTY, on: all.on })
+        return { text: '주제를 전부 지웠습니다. 다음 주제는 1번부터 시작합니다.' }
       }
 
       // 번호를 안 주면 지금 주제. 가장 흔한 경우다
@@ -335,13 +438,7 @@ export const register: Register = on => {
       const gone = all.byTopic[key]
       if (!gone) return { text: `${key || '지금'} 주제가 없습니다.` }
 
-      const rest = { ...all.byTopic }
-      delete rest[key]
-      await save($, {
-        ...all,
-        byTopic: rest,
-        current: all.current === key ? (Object.keys(rest)[0] ?? '') : all.current,
-      })
+      await save($, without(all, key))
       return { text: `${gone.no}. ${gone.title} — 지웠습니다.` }
     }
 
@@ -532,10 +629,8 @@ export const register: Register = on => {
             line = '지울 것 없음'
             break
           }
-          const rest = { ...all.byTopic }
-          delete rest[String(cur.no)]
           line = `"${cur.title}" 지움`
-          await save($, { ...all, byTopic: rest, current: Object.keys(rest)[0] ?? '' })
+          await save($, without(all, String(cur.no)))
           break
         }
         default: {
@@ -587,14 +682,7 @@ export const register: Register = on => {
 
     /** 주제 하나를 버린다. 지운 번호는 다시 쓰지 않는다 */
     const drop = async (key: string) => {
-      const now = await read($, trails)
-      const rest = { ...now.byTopic }
-      delete rest[key]
-      await save($, {
-        ...now,
-        byTopic: rest,
-        current: now.current === key ? (Object.keys(rest)[0] ?? '') : now.current,
-      })
+      await save($, without(await read($, trails), key))
     }
 
     const folded = cur ? all.collapsed.includes(String(cur.no)) : false

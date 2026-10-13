@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 
-import { captureTarget, migrate, staleOf } from './register'
+import { captureTarget, migrate, splitSections, staleOf, without } from './register'
 
 const TOOL = 'mcp__learn-trail__trail'
 
@@ -359,12 +359,102 @@ test('next 로 마지막을 넘기면 목차 끝이다', async $ => {
   expect((await $.tool.call({ tool: TOOL, action: 'next' })).text).toContain('목차 끝')
 })
 
-/** 지운 번호는 다시 쓰지 않는다 — 같은 번호가 다른 주제를 가리키면 헷갈린다 */
-test('지운 뒤 새 주제는 다음 번호를 받는다', async $ => {
+/** 남은 주제가 있으면 지운 번호를 다시 쓰지 않는다 — 같은 번호가 다른 주제를 가리키면 헷갈린다 */
+test('남은 주제가 있으면 지운 번호를 건너뛴다', async $ => {
   await run($, 'trail')
   await $.tool.call({ tool: TOOL, action: 'set', title: 'A 주제', items: ['가'] })
+  await $.tool.call({ tool: TOOL, action: 'set', title: 'B 주제', items: ['가'] })
   await run($, 'trail', 'drop 1')
 
-  const res = await $.tool.call({ tool: TOOL, action: 'set', title: 'B 주제', items: ['가'] })
-  expect(res.text).toContain('/recall 2.1')
+  const res = await $.tool.call({ tool: TOOL, action: 'set', title: 'C 주제', items: ['가'] })
+  expect(res.text).toContain('/recall 3.1')
+})
+
+
+// ─────────────────────────────────────────────────────────────
+// 2026-10-13 — 답이 토막 나던 것 · 다 지웠는데 7번부터 시작하던 것
+// ─────────────────────────────────────────────────────────────
+
+/** 다 지웠으면 1번부터 — 남은 게 없으면 번호가 겹칠 일도 없다 */
+test('전부 지우면 다음 주제는 1번이다', async $ => {
+  await run($, 'trail')
+  for (const t of ['가 주제', '나 주제', '다 주제']) {
+    await $.tool.call({ tool: TOOL, action: 'set', title: t, items: ['하나'] })
+  }
+  const dropped = await run($, 'trail', 'drop all')
+  expect(dropped.text).toContain('1번부터')
+
+  const res = await $.tool.call({ tool: TOOL, action: 'set', title: '새 주제', items: ['하나'] })
+  expect(res.text).toContain('/recall 1.1')
+})
+
+test('낱개로 지워 하나도 안 남아도 1번부터다', async () => {
+  const one = { on: true, nextNo: 7, collapsed: ['6'], current: '6', kept: ['6'],
+    byTopic: { '6': { title: 'x', no: 6, slug: 'x', items: ['가'], cursor: 0, done: [], notes: {}, branches: [], touchedAt: 0 } } }
+  const after = without(one as never, '6')
+  expect(after.nextNo).toBe(1)
+  expect(after.current).toBe('')
+  // 지운 주제의 접힘·두기 표시도 같이 치운다 — 같은 번호를 다시 받을 때 따라오면 안 된다
+  expect(after.collapsed).toEqual([])
+  expect(after.kept).toEqual([])
+})
+
+/**
+ * 한 번에 쓴 답을 머리말로 자른다.
+ *
+ * 항목마다 도구를 부르게 했더니 답이 토막 나고 1~7번이 "정리했어요" 한 줄로만 남았다.
+ * 답은 한 번에 쓰게 하고, 여기서 번호 머리말로 나눈다.
+ */
+test('번호 머리말로 항목별 본문을 나눈다', async () => {
+  const text = [
+    '도입 한 줄.',
+    '## 1. 백엔드가 하는 일',
+    '요청을 받아 데이터를 처리해 돌려준다.',
+    '## 2. HTTP',
+    '요청과 응답의 약속이다.',
+    '**3. REST**',
+    '자원을 URL 로 나타낸다.',
+  ].join('\n')
+
+  const parts = splitSections(text, 8)
+  expect([...parts.keys()]).toEqual([0, 1, 2])
+  expect(parts.get(0)).toContain('데이터를 처리해')
+  expect(parts.get(1)).toContain('요청과 응답의 약속')
+  expect(parts.get(2)).toContain('URL 로')
+  // 다음 머리말은 앞 항목에 섞이지 않는다
+  expect(parts.get(0)).not.toContain('HTTP')
+})
+
+test('본문 속 번호 목록은 머리말로 치지 않는다', async () => {
+  const text = [
+    '## 1. 데이터베이스',
+    '고를 때 볼 것:',
+    '1. 정합성',
+    '2. 확장성',
+    '## 2. 인증',
+    '세션과 토큰.',
+  ].join('\n')
+
+  const parts = splitSections(text, 8)
+  // "1. 정합성" "2. 확장성" 은 순서상 머리말 자리가 아니다 — 1·2 두 항목만 나온다
+  expect([...parts.keys()]).toEqual([0, 1])
+  expect(parts.get(0)).toContain('정합성')
+  expect(parts.get(0)).toContain('확장성')
+})
+
+test('머리말이 하나뿐이면 쪼개지 않는다', async () => {
+  expect(splitSections('## 1. 하나\n본문', 8).size).toBe(0)
+  expect(splitSections('머리말 없는 답', 8).size).toBe(0)
+})
+
+test('목차보다 큰 번호는 머리말이 아니다', async () => {
+  const parts = splitSections('## 1. 가\na\n## 2. 나\nb\n## 3. 다\nc', 2)
+  expect([...parts.keys()]).toEqual([0, 1])
+  expect(parts.get(1)).toContain('3. 다') // 범위 밖 머리말은 앞 항목 본문에 남는다
+})
+
+test('표시 없는 머리말만 있는 답도 나눈다', async () => {
+  const parts = splitSections('1. 가\n본문 a\n2. 나\n본문 b', 8)
+  expect([...parts.keys()]).toEqual([0, 1])
+  expect(parts.get(1)).toContain('본문 b')
 })

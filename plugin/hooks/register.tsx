@@ -915,6 +915,8 @@ export const register: Register = on => {
         <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1} marginTop={1}>
           <Text dimColor>{all.on ? '쌓는 중 — 그만하려면  /trail off' : '멈춤 — 다시 쌓으려면  /trail'}</Text>
           <Text dimColor>{'설명을 대화로 받기   /recall 1.2'}</Text>
+          <Text dimColor>{'  주제 전체          /recall 1'}</Text>
+          <Text dimColor>{'  여러 항목          /recall 1.1,3 · 1.2-4'}</Text>
           <Text dimColor>{'주제 지우기          /trail drop 1'}</Text>
           <Text dimColor>{'패널 닫기            /trail close'}</Text>
           <Text dimColor>{'이 패널로 들어오기   ctrl+x 누르고 tab'}</Text>

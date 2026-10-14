@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-d97757.svg)](https://claude.com/claude-code)
-![Version](https://img.shields.io/badge/version-0.2.0-informational.svg)
+![Version](https://img.shields.io/badge/version-0.3.0-informational.svg)
 
 > A table of contents for long explanations in [Claude Code](https://claude.com/claude-code) —
 > every section is saved exactly as written, so you can replay it later with `/recall`.
@@ -36,7 +36,8 @@ recording
 /recall 1.1,3  1.2-4   pick sections · ranges
 /trail drop 1          delete a topic
 /trail close           close the pane
-ctrl+x, tab            focus the pane (Enter on a topic: fold · unfold · switch)
+ctrl+x, tab            focus the pane
+Enter                  fold · unfold · switch topic
 ```
 
 <sub>Illustration translated for this README. The pane, commands' messages and the
@@ -92,12 +93,32 @@ answer on those headings and saves one note per section.
 | `/recall 1` | **All** of topic 1 |
 | `/recall 1.2` | Section 2 of topic 1 |
 | `/recall 1.1,3` · `/recall 1.2-4` | A list · a range (mix them: `1.1,3-5`) |
+| `/recall 2a` · `/recall 2a.3` | Side question `a` of topic 2 (whole · section 3) |
 | `/recall hikari` · `/recall hikari 2` | By title prefix when you forget the number (whole topic · one section) |
-| `/trail drop 1` | Delete topic 1 (no number = current topic) |
+| `/trail drop 1` · `/trail drop 2a` | Delete a topic or side question (no number = current); its own side questions go with it |
 | `/trail drop all` | Delete everything |
 
 **Type the number the pane shows.** See `1.3`, type `/recall 1.3`. Deleted topic numbers are
 never reused (deleting everything starts again from 1).
+
+### Side questions
+
+A "wait, what's that?" detour becomes a side question. It doesn't take a topic number: it gets the
+parent's number plus a letter — `2a`, `2b` from topic 2, `2aa` for a side question of `2a`.
+Deleted letters are reused (delete `2b`, the next one is `2b` again). Side answers are saved
+verbatim too, and stay replayable with `/recall 2a` after you return.
+
+```
+▾ 2. nginx and reverse proxies  ✕
+  ✓ 2.5 Reverse proxy in nginx config  ●
+  ▸ 2.6 Applying it to our servers  ●  ← now
+      ↳ 2a. Why can't Tomcat be a reverse proxy (5)
+```
+
+The pane draws one outline at a time. Press Enter on a side-question row to step in: the header
+becomes a path (`2. nginx and rever… › 2a. Why can't Tomcat…`) and a `↰` row at the bottom takes
+you back. However deep you go, the pane keeps the same shape. The status line shows where you are
+(`학습 2a.3`).
 
 ## How it works
 
@@ -107,7 +128,8 @@ never reused (deleting everything starts again from 1).
   split on its numbered headings. Claude never writes the same text twice.
   - A reply from a turn that did not call `trail` (`set` · `focus` · `next`) is **not** saved, so
     unrelated chat can't overwrite a saved section.
-  - Replies while a side question (`push`) is open are not saved either.
+  - After `push`, replies are saved to the side question, never over the parent's section. Text
+    written after `pop` is not saved.
 - **Storage** — plugin storage (`$.store`), local to you, kept across sessions.
 
 ## Limitations

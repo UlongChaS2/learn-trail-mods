@@ -105,9 +105,16 @@ Enter                  주제 접기 · 펴기 · 바꾸기
 
 ### 패널 조작
 
-`ctrl+x` 누르고 `tab` 으로 패널에 들어가(키를 `~/.claude/keybindings.json` 에서
-`abovePrompt:focus` 로 바꿔 두면 패널 안내에도 그 키가 뜬다), 주제 줄 사이를 오가며 Enter — 지금 주제면 접고 펴고,
+`ctrl+x` 누르고 `tab` 으로 패널에 들어가, 주제 줄 사이를 오가며 Enter — 지금 주제면 접고 펴고,
 다른 주제면 그쪽으로 옮긴다. `✕` 는 버린다. 7일 넘게 안 본 주제는 켤 때 지울지 묻는다.
+
+**패널 키는 사람마다 바꿀 수 있다.** `ctrl+x` 가 터미널·tmux 같은 다른 도구의 키와 겹치면
+`~/.claude/keybindings.json` 에서 `abovePrompt:focus` 에 원하는 키를 붙인다. 패널 안내 상자도
+그 키를 읽어 보여 준다(바꾸지 않았으면 기본 키 `ctrl+x, tab`). 세션을 새로 열면 반영된다.
+
+```json
+{ "bindings": [{ "context": "Chat", "bindings": { "alt+g": "abovePrompt:focus" } }] }
+```
 
 ## 어떻게 동작하나
 

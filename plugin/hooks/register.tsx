@@ -5,8 +5,38 @@ import type { Trail, Trails } from '../types'
 
 const PANE = 'learn-trail'
 
-/** 패널 안내 상자의 왼쪽(설명) 칸 폭. 가장 긴 "  주제 줄에서 Enter" 가 19칸이다 */
-const HELP_LABEL = 21
+/** 패널 안내 상자의 왼쪽(명령) 칸 폭. 가장 긴 "/recall 1.1,3  1.2-4" 가 20칸이다 */
+const HELP_HOW = 22
+
+/** 패널로 들어오는 엔진 동작. 기본 키는 ctrl+x tab 이다 */
+const FOCUS_ACTION = 'abovePrompt:focus'
+const FOCUS_DEFAULT = 'ctrl+x tab'
+
+/**
+ * 패널로 들어오는 키 — 사람이 keybindings.json 에 바꿔 둔 것이 있으면 그것.
+ *
+ * 안내 상자에 기본 키만 적어 두면, 키를 바꾼 사람(ctrl+x 가 터미널 키와 겹쳐 alt+g 로
+ * 옮긴 경우, 2026-10-14)에게는 틀린 안내가 된다. 엔진에 "이 동작의 키" 를 묻는 길이
+ * 없어 설정 파일을 직접 읽는다. 못 읽으면 기본 키다.
+ *
+ * @returns 화면에 적을 모양 — 연속 키(chord)는 쉼표로 띄운다: `ctrl+x, tab`
+ */
+export const focusKeyOf = (config: unknown): string => {
+  const blocks = (config as { bindings?: unknown })?.bindings
+  const mine: string[] = []
+  if (Array.isArray(blocks)) {
+    for (const b of blocks) {
+      const keys = (b as { bindings?: Record<string, unknown> })?.bindings ?? {}
+      for (const [key, action] of Object.entries(keys)) {
+        if (action === FOCUS_ACTION) mine.push(key)
+      }
+    }
+  }
+  return (mine[0] ?? FOCUS_DEFAULT).split(' ').join(', ')
+}
+
+/** 이 세션에서 읽은 키. 모듈을 다시 불러오면 session.start 가 다시 읽는다 */
+let focusKey = focusKeyOf(undefined)
 const STORE_KEY = 'trails'
 
 /** 이 날수보다 오래 손 안 댄 주제는 켤 때 "지울까요" 하고 묻는다 */
@@ -37,8 +67,13 @@ const trails = atom({ plugin: 'learn-trail', key: 'trails' } as const, EMPTY)
  */
 const armed = atom({ plugin: 'learn-trail', key: 'armed' } as const, false)
 
-/** 도구를 이 중 하나로 부른 턴의 답만 본문이다 */
-const ARMING = ['set', 'focus', 'next']
+/**
+ * 도구를 이 중 하나로 부른 턴의 답만 본문이다.
+ *
+ * push 도 든다 — 그 뒤의 답은 곁가지 본문이다. pop 은 반대로 내린다. pop 뒤에 덧붙이는
+ * 마무리 말이 부모 항목 본문을 덮어쓰면 안 된다.
+ */
+const ARMING = ['set', 'focus', 'next', 'push']
 
 /**
  * state 와 store 양쪽에 쓴다.
@@ -49,55 +84,192 @@ const ARMING = ['set', 'focus', 'next']
  */
 const save = async ($: EngineInterface, next: Trails) => {
   await update($, trails, () => next)
+  // 상태줄이 안 되는 곳(테스트·일부 화면)이어도 저장은 계속된다
+  try {
+    $.ui.status(statusOf(next))
+  } catch {}
   await $.store.set(STORE_KEY, next).catch(() => {})
+}
+
+/** 곁가지 글자. 지운 자리는 다시 채운다 — 2b 를 지우고 새로 열면 다시 2b 다 */
+const LETTERS = 'abcdefghijklmnopqrstuvwxyz'
+
+/**
+ * 주제 이름 순서 — 큰 주제는 번호로, 곁가지는 그 뒤에 글자 순으로.
+ *
+ * 그냥 문자열로 비교하면 "10" 이 "2" 앞에 온다.
+ */
+export const byId = (a: Trail, b: Trail): number => {
+  const na = Number.parseInt(a.id, 10)
+  const nb = Number.parseInt(b.id, 10)
+  return na !== nb ? na - nb : a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+}
+
+/**
+ * 이 주제에서 새 곁가지가 받을 이름 — 부모 이름 뒤에 비어 있는 첫 글자.
+ *
+ * 큰 주제 번호는 다시 쓰지 않지만 곁가지 글자는 채운다. 곁가지는 부모 안에 묶여 있어
+ * 다른 주제와 헷갈릴 일이 없고, 지운 자리를 건너뛰면 2a 다음이 2c 라 왜 b 가 없는지 묻게
+ * 된다(2026-10-14 요청). 26개를 다 쓰면 undefined.
+ */
+export const nextBranchId = (all: Trails, parentId: string): string | undefined => {
+  for (const l of LETTERS) {
+    if (!all.byTopic[parentId + l]) return parentId + l
+  }
+  return undefined
 }
 
 /**
  * 옛 모양으로 저장된 것을 지금 모양으로 끌어올린다.
  *
- * 주소를 이름(slug)에서 번호로 바꿨다. 그때 저장돼 있던 것은 번호가 없어 패널에
- * "undefined." 로 찍히고 /recall 로도 못 부른다. 쌓는 데 시간이 걸린 것들이라
- * 버리지 않고 번호를 매겨 준다 — 쌓인 것을 지키는 게 이 mod 의 일이다.
+ * 세 번 바뀌었다. 처음엔 이름(slug)으로 불렀고, 다음엔 번호(`no`)로, 지금은 이름(`id`)으로
+ * 부른다 — 큰 주제는 "2", 곁가지는 "2a". 곁가지도 번호를 받던 때는 곁가지가 큰 주제
+ * 번호를 잡아먹어 1, 2 다음 주제가 4 가 됐다. 그때 저장된 것을 버리지 않고 옮긴다 —
+ * 쌓인 것을 지키는 게 이 mod 의 일이다.
  */
 export const migrate = (all: Trails): Trails => {
-  if (Object.values(all.byTopic).every(t => typeof t.no === 'number')) return all
+  type Old = Trail & { no?: number; branches?: string[]; parent?: { id?: string; no?: number; at: number } }
+  const olds = Object.entries(all.byTopic) as [string, Old][]
+  if (olds.every(([, t]) => typeof t.id === 'string' && !('no' in t) && !('branches' in t))) return all
 
-  let no = all.nextNo > 1 ? all.nextNo : 1
+  // 1) 옛 번호를 정한다. 번호도 없던 것(이름으로 부르던 때)에는 뒤에 이어 매긴다
+  let spare = Math.max(1, all.nextNo, ...olds.map(([, t]) => (typeof t.no === 'number' ? t.no + 1 : 1)))
+  // 이미 이름(id)이 있는 것은 그 이름을 지킨다 — 옛 칸(branches)만 걷어 내면 된다
+  const named = (t: Old) => typeof t.id === 'string' && typeof t.no !== 'number'
+  const numbered = olds.map(([key, t]) => ({
+    key,
+    t,
+    n: typeof t.no === 'number' ? t.no : named(t) ? Number.parseInt(t.id, 10) : spare++,
+  }))
+  numbered.sort((x, y) => x.n - y.n)
+
+  // 2) 부모가 먼저 오도록 번호 순으로 이름을 붙인다. 곁가지는 부모 이름 + 글자
+  const idOf = new Map<number, string>()
   const byTopic: Record<string, Trail> = {}
-  let current = ''
-  for (const [key, t] of Object.entries(all.byTopic)) {
-    const assigned = typeof t.no === 'number' ? t.no : no++
-    byTopic[String(assigned)] = {
-      ...t,
-      no: assigned,
-      slug: t.slug ?? '',
+  const keyToId = new Map<string, string>()
+  for (const { key, t, n } of numbered) {
+    const { branches: _b, no: _n, parent, ...rest } = t
+    const parentId = parent ? (parent.id ?? (parent.no !== undefined ? idOf.get(parent.no) : undefined)) : undefined
+    const draft = { ...all, byTopic }
+    const id = named(t)
+      ? t.id
+      : parentId && byTopic[parentId]
+        ? (nextBranchId(draft, parentId) ?? String(n))
+        : String(n)
+    if (!named(t)) idOf.set(n, id)
+    keyToId.set(key, id)
+    byTopic[id] = {
+      ...rest,
+      id,
+      slug: rest.slug ?? '',
+      ...(parentId && id !== String(n) ? { parent: { id: parentId, at: parent?.at ?? 0 } } : {}),
       // 옛것에는 손댄 때가 없다. 지금으로 치면 바로 "묵었다" 고 묻지 않는다
-      touchedAt: typeof t.touchedAt === 'number' ? t.touchedAt : Date.now(),
+      touchedAt: typeof rest.touchedAt === 'number' ? rest.touchedAt : Date.now(),
     }
-    if (key === all.current) current = String(assigned)
   }
-  return { ...all, byTopic, current: current || (Object.keys(byTopic)[0] ?? ''), nextNo: no }
+
+  // 3) 큰 주제 번호는 남은 큰 주제 다음부터. 곁가지가 잡아먹던 번호를 돌려받는다
+  const roots = Object.values(byTopic).filter(t => !t.parent).map(t => Number.parseInt(t.id, 10))
+  const map = (k: string) => keyToId.get(k) ?? idOf.get(Number.parseInt(k, 10))
+  return {
+    ...all,
+    byTopic,
+    current: map(all.current) ?? Object.keys(byTopic)[0] ?? '',
+    nextNo: roots.length > 0 ? Math.max(...roots) + 1 : 1,
+    collapsed: all.collapsed.map(map).filter((k): k is string => !!k),
+    kept: all.kept.map(map).filter((k): k is string => !!k),
+  }
 }
 
 /**
- * 주제 하나를 뺀 상태. 하나도 안 남으면 번호를 1 로 되돌린다.
+ * 주제 하나를 뺀 상태. 큰 주제가 하나도 안 남으면 번호를 1 로 되돌린다.
  *
  * 번호를 다시 쓰지 않는 건 남은 주제와 겹치지 않게 하려는 것이다. 남은 게 없으면 겹칠
  * 것도 없다 — 다 지웠는데 다음 주제가 7번으로 시작하면 왜 7인지 묻게 된다(2026-10-13).
  */
 export const without = (all: Trails, key: string): Trails => {
+  // 곁가지는 그 주제의 일부다. 부모만 지우면 갈 곳 없는 곁가지가 맨 위로 떠오른다
+  const gone = new Set([key])
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const t of Object.values(all.byTopic)) {
+      if (t.parent && gone.has(t.parent.id) && !gone.has(t.id)) {
+        gone.add(t.id)
+        grew = true
+      }
+    }
+  }
   const rest = { ...all.byTopic }
-  delete rest[key]
+  for (const k of gone) delete rest[k]
   const empty = Object.keys(rest).length === 0
+
+  // 지운 것이 지금 보던 곁가지면 부모로 돌아간다. 엉뚱한 첫 주제로 튀면 길을 잃는다
+  const parentId = all.byTopic[key]?.parent?.id
+  const back = parentId !== undefined && rest[parentId] ? parentId : (Object.keys(rest)[0] ?? '')
   return {
     ...all,
     byTopic: rest,
-    current: all.current === key ? (Object.keys(rest)[0] ?? '') : all.current,
+    current: gone.has(all.current) ? back : all.current,
     nextNo: empty ? 1 : all.nextNo,
-    collapsed: all.collapsed.filter(k => k !== key),
-    kept: all.kept.filter(k => k !== key),
+    collapsed: all.collapsed.filter(k => !gone.has(k)),
+    kept: all.kept.filter(k => !gone.has(k)),
   }
 }
+
+/** 곁가지를 따라 올라가 맨 위 주제를 찾는다 */
+export const rootOf = (all: Trails, t: Trail): Trail => {
+  let at = t
+  const seen = new Set<string>()
+  while (at.parent && !seen.has(at.id)) {
+    seen.add(at.id)
+    const up = all.byTopic[at.parent.id]
+    if (!up) break
+    at = up
+  }
+  return at
+}
+
+/** 이 주제의 이 항목에서 갈라진 곁가지들 */
+const childrenAt = (all: Trails, id: string, at: number): Trail[] =>
+  Object.values(all.byTopic)
+    .filter(t => t.parent?.id === id && t.parent.at === at)
+    .sort(byId)
+
+/** 이 길이를 넘는 제목은 경로에서 줄인다. 마지막(지금) 주제만 다 적는다 */
+const CRUMB_TITLE = 12
+
+/**
+ * 맨 위 주제부터 지금 주제까지의 경로 — `2. nginx와 리버스 프… › 2a. 톰캣은 왜 리버스 프록시가 안 되나`.
+ *
+ * 네 단계를 넘으면 가운데를 `…` 로 줄인다. 맨 위(무슨 얘기였나)와 끝 둘(어디서 왔고
+ * 지금 어디인가)이 남으면 길을 잃지 않는다.
+ */
+export const crumbOf = (all: Trails, t: Trail): string => {
+  const chain: Trail[] = []
+  for (let at: Trail | undefined = t; at; at = at.parent ? all.byTopic[at.parent.id] : undefined) {
+    if (chain.includes(at)) break
+    chain.unshift(at)
+  }
+  const short = (x: Trail) =>
+    x === t || x.title.length <= CRUMB_TITLE ? `${x.id}. ${x.title}` : `${x.id}. ${x.title.slice(0, CRUMB_TITLE)}…`
+  const parts = chain.map(short)
+  return (parts.length > 4 ? [parts[0], '…', ...parts.slice(-2)] : parts).join(' › ')
+}
+
+/**
+ * 상태줄 한 줄 — 패널을 닫아 두어도 지금 어디인지 보인다. 꺼져 있거나 목차가 없으면 지운다.
+ * 곁가지 이름(2a)에 이미 어디서 왔는지가 들어 있어 경로를 따로 적지 않는다.
+ */
+export const statusOf = (all: Trails): string | undefined => {
+  const cur = all.byTopic[all.current]
+  if (!all.on || !cur) return undefined
+  const where = cur.cursor >= 0 ? `.${cur.cursor + 1}` : ''
+  return `학습 ${cur.id}${where}`
+}
+
+/** 곁가지면 어디서 갈라졌는지 한마디. 맨 위 주제면 빈 문자열 */
+const fromOf = (t: Trail): string => (t.parent ? ` (${t.parent.id}.${t.parent.at + 1} 의 곁가지)` : '')
 
 /** 지금 보고 있는 주제. 없으면 undefined */
 const currentOf = (all: Trails): Trail | undefined => all.byTopic[all.current]
@@ -133,6 +305,7 @@ type RecallArgs = { topic?: string; name?: string; picks?: number[]; bad?: strin
  * `/recall` 뒤에 적은 것을 읽는다.
  *
  * `2` 는 2번 주제 전체, `2.3` 은 2번 주제의 3번, `2.1,3` · `2.2-4` 는 여러 항목,
+ * `2a` · `2a.3` 은 2번에서 갈라진 곁가지 전체 · 그 3번,
  * `hikari` 는 이름으로 찾은 주제 전체, `hikari 3` 은 그 주제의 3번. 사람이 보는 번호는
  * 1부터, 안에서는 0부터다.
  *
@@ -145,10 +318,15 @@ export const parseArgs = (args: string): RecallArgs => {
   let bare: string | undefined
   let spec: string | undefined
   for (const w of args.trim().split(/\s+/).filter(Boolean)) {
-    const dotted = w.match(/^(\d+)\.(.*)$/)
+    const dotted = w.toLowerCase().match(/^(\d+[a-z]*)\.(.*)$/)
     if (dotted) {
       out.topic = dotted[1] ?? ''
       if (dotted[2]) spec = dotted[2]
+      continue
+    }
+    // 곁가지 이름(2a)은 숫자로 시작해도 항목 번호일 수 없다 — 바로 주제다
+    if (/^\d+[a-z]+$/i.test(w)) {
+      out.topic = w.toLowerCase()
       continue
     }
     if (/^\d+$/.test(w)) {
@@ -189,7 +367,7 @@ const recallText = (t: Trail | undefined, at?: number): string => {
   }
   const want = at ?? t.cursor
   const i = want >= 0 && want < t.items.length ? want : 0
-  const head = `${t.title} — ${i + 1}. ${t.items[i]}`
+  const head = `${t.title}${fromOf(t)} — ${i + 1}. ${t.items[i]}`
   const saved = t.notes?.[String(i)]
   return saved ? `${head}\n\n${saved}` : `${head}\n\n(이 항목은 아직 설명이 저장되지 않았습니다.)`
 }
@@ -203,8 +381,8 @@ const recallText = (t: Trail | undefined, at?: number): string => {
 const recallManyText = (t: Trail, picks: number[]): string => {
   const whole = picks.length === t.items.length
   const head = whole
-    ? `${t.title} — 전체 ${t.items.length}개`
-    : `${t.title} — ${picks.map(i => i + 1).join(', ')}번`
+    ? `${t.title}${fromOf(t)} — 전체 ${t.items.length}개`
+    : `${t.title}${fromOf(t)} — ${picks.map(i => i + 1).join(', ')}번`
   const parts = picks.map(i => {
     const saved = t.notes?.[String(i)]
     return `${i + 1}. ${t.items[i]}\n\n${saved || '(이 항목은 아직 설명이 저장되지 않았습니다.)'}`
@@ -213,15 +391,14 @@ const recallManyText = (t: Trail, picks: number[]): string => {
 }
 
 /** 목차를 새로 깔면 그 주제의 진행 상태는 초기화된다 — 반쯤 남은 표시가 섞이면 더 헷갈린다 */
-const startTrail = (title: string, no: number, items: string[]): Trail => ({
+const startTrail = (title: string, id: string, items: string[]): Trail => ({
   title,
-  no,
+  id,
   slug: slugOf(title),
   items,
   cursor: items.length > 0 ? 0 : -1,
   done: [],
   notes: {},
-  branches: [],
   touchedAt: Date.now(),
 })
 
@@ -243,7 +420,8 @@ const advance = (t: Trail): Trail => {
 export const staleOf = (all: Trails, now: number = Date.now()): Trail[] => {
   const line = now - STALE_DAYS * DAY
   return Object.values(all.byTopic).filter(
-    t => t.touchedAt < line && !all.kept.includes(String(t.no)) && String(t.no) !== all.current,
+    // 곁가지는 묻지 않는다. 지우면 그 주제와 함께 지워진다
+    t => !t.parent && t.touchedAt < line && !all.kept.includes(t.id) && t.id !== all.current,
   )
 }
 
@@ -302,9 +480,8 @@ export const splitSections = (text: string, itemCount: number): Map<number, stri
 /**
  * 모델의 답을 지금 항목의 본문으로 담아도 되는가.
  *
- * 곁가지가 열려 있으면 담지 않는다. 그 답은 곁가지 질문에 대한 것이지 지금 항목의 설명이
- * 아니다 — 담으면 원래 설명을 덮어써서, /recall 했을 때 엉뚱한 글이 나온다. 곁가지는
- * 이 mod 를 만든 이유인데 곁가지를 쓰면 본문이 지워지는 셈이었다.
+ * 곁가지에 들어가 있으면 지금 주제가 그 곁가지다. 답은 곁가지 본문으로 담기고 부모 항목은
+ * 건드리지 않는다. 예전에는 부모를 덮어쓸까 봐 곁가지 답을 아예 버렸다(2026-10-14).
  *
  * 이번 턴에 도구를 안 불렀으면(`armed` 가 아니면) 담지 않는다. 그 답은 목차와 상관없는
  * 대화다 — `/recall 1.1` 로 커서를 1번에 옮긴 뒤 다른 얘기를 하니, 그 답이 1번 본문을
@@ -314,7 +491,6 @@ export const captureTarget = (all: Trails, armed: boolean): Trail | undefined =>
   if (!all.on || !armed) return undefined
   const cur = all.byTopic[all.current]
   if (!cur || cur.cursor < 0) return undefined
-  if (cur.branches.length > 0) return undefined
   return cur
 }
 
@@ -326,6 +502,12 @@ const agoOf = (at: number): string => {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
+    try {
+      const dir = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${(await $.env.get('HOME')) ?? ''}/.claude`
+      focusKey = focusKeyOf(JSON.parse(await $.fs.read(`${dir}/keybindings.json`)))
+    } catch {
+      // 파일이 없거나 못 읽으면 기본 키 그대로
+    }
     await $.command.register({
       name: 'trail',
       description: '학습 경로 패널을 열고 쌓기 시작한다 (close 닫기 · off 그만 · drop N 지움)',
@@ -367,10 +549,10 @@ export const register: Register = on => {
           items: {
             type: 'array',
             items: { type: 'string' },
-            description: 'set 일 때 목차 항목들 (순서가 번호)',
+            description: 'set 일 때 목차 항목들 (순서가 번호). push 일 때는 곁가지 답이 여러 항목이면 그 목차',
           },
           index: { type: 'number', description: 'focus 일 때 항목 번호 (1부터)' },
-          label: { type: 'string', description: 'push 일 때 곁가지 질문 한 줄' },
+          label: { type: 'string', description: 'push 일 때 곁가지 질문 한 줄 (곁가지 제목이 된다)' },
         },
         required: ['action'],
       },
@@ -408,7 +590,9 @@ export const register: Register = on => {
             '   목차 끝까지 한 번에 이어서 쓴다. 더 파고들지는 사람이 다 읽고 정한다.',
             '6) 이미 깐 목차의 한 항목을 다시·더 설명할 때는 focus 로 그 항목을 짚은 뒤 쓴다.',
             '   trail 을 부르지 않은 턴의 답은 저장되지 않는다.',
-            '사람이 중간에 다른 걸 물어 곁가지로 빠질 때는 push, 그 답을 마치면 pop 을 부른다.',
+            '사람이 중간에 다른 걸 물어 곁가지로 빠질 때는 답을 쓰기 전에 push, 그 답을 마치면 pop 을 부른다.',
+            '   곁가지 답이 여러 항목이면 push 에 items 도 넘기고 각 항목을 "## 1. 제목" 으로 쓴다.',
+            '   한 덩어리면 label 만 넘긴다. pop 뒤에 쓴 말은 저장되지 않는다.',
             '한 갈래로 끝나는 짧은 답에는 쓰지 않는다.',
           ].join('\n'),
         },
@@ -468,7 +652,7 @@ export const register: Register = on => {
           ...all,
           byTopic: {
             ...all.byTopic,
-            [String(cur.no)]: touch({
+            [cur.id]: touch({
               ...cur,
               notes,
               // 쓴 항목은 끝낸 것으로, 마지막으로 쓴 곳을 "지금" 으로 둔다
@@ -486,7 +670,7 @@ export const register: Register = on => {
         ...all,
         byTopic: {
           ...all.byTopic,
-          [String(cur.no)]: touch({
+          [cur.id]: touch({
             ...cur,
             notes: { ...cur.notes, [String(cur.cursor)]: text },
           }),
@@ -531,7 +715,7 @@ export const register: Register = on => {
       if (!gone) return { text: `${key || '지금'} 주제가 없습니다.` }
 
       await save($, without(all, key))
-      return { text: `${gone.no}. ${gone.title} — 지웠습니다.` }
+      return { text: `${gone.id}. ${gone.title} — 지웠습니다.` }
     }
 
     // 패널을 여는 것 자체가 "쓰겠다" 는 뜻이다. 따로 켜게 하면, 열어 놓고 안 쌓이는
@@ -569,14 +753,14 @@ export const register: Register = on => {
 
     const list = () =>
       Object.values(all.byTopic)
-        .sort((a, b) => a.no - b.no)
-        .map(x => `${x.no}. ${x.title}  (/recall ${x.no}.1)`)
+        .sort(byId)
+        .map(x => `${x.id}. ${x.title}${fromOf(x)}  (/recall ${x.id}.1)`)
 
     let t = currentOf(all)
     if (topic !== undefined) {
       t = all.byTopic[topic]
       if (!t) {
-        return { text: `${topic}번 주제가 없습니다.\n\n들고 있는 것:\n- ${list().join('\n- ')}` }
+        return { text: `${topic}${/^\d+$/.test(topic) ? '번' : ''} 주제가 없습니다.\n\n들고 있는 것:\n- ${list().join('\n- ')}` }
       }
     } else if (name !== undefined) {
       // 번호가 기억 안 날 때를 위해 이름도 받는다. 앞부분만 쳐도 찾는다
@@ -600,7 +784,7 @@ export const register: Register = on => {
     const missing = (picks ?? []).filter(i => i < 0 || i >= t.items.length)
     if (missing.length > 0) {
       const nos = missing.map(i => i + 1).join(', ')
-      return { text: `${t.no}번 주제에는 ${nos}번 항목이 없습니다 (1 ~ ${t.items.length}).` }
+      return { text: `${t.id}번 주제에는 ${nos}번 항목이 없습니다 (1 ~ ${t.items.length}).` }
     }
 
     // 주제만 짚으면 전체다. 아무것도 안 짚으면 지금 자리 하나
@@ -609,7 +793,7 @@ export const register: Register = on => {
 
     // 여럿을 보여 줄 때는 패널의 "지금" 을 그대로 둔다. 어느 하나로 옮길 근거가 없다
     if (want && want.length > 1) {
-      await save($, { ...all, current: String(t.no), byTopic: { ...all.byTopic, [String(t.no)]: touch(t) } })
+      await save($, { ...all, current: t.id, byTopic: { ...all.byTopic, [t.id]: touch(t) } })
       return { text: recallManyText(t, want) }
     }
 
@@ -618,8 +802,8 @@ export const register: Register = on => {
     const i = want?.[0] ?? t.cursor
     await save($, {
       ...all,
-      current: String(t.no),
-      byTopic: { ...all.byTopic, [String(t.no)]: touch({ ...t, cursor: i }) },
+      current: t.id,
+      byTopic: { ...all.byTopic, [t.id]: touch({ ...t, cursor: i }) },
     })
     return { text: recallText(t, i) }
   }).catch(($, e, next) => {
@@ -653,8 +837,8 @@ export const register: Register = on => {
       /** 그 주제를 지금 주제로 세우고 저장할 모양을 만든다 */
       const put = (t: Trail): Trails => ({
         ...all,
-        current: String(t.no),
-        byTopic: { ...all.byTopic, [String(t.no)]: touch(t) },
+        current: t.id,
+        byTopic: { ...all.byTopic, [t.id]: touch(t) },
       })
 
       switch (input.action) {
@@ -664,7 +848,7 @@ export const register: Register = on => {
           const no = all.nextNo
           line = `목차 ${items.length}개 — ${title} (/recall ${no}.1)`
           await save($, {
-            ...put(startTrail(title, no, items)),
+            ...put(startTrail(title, String(no), items)),
             // 지운 번호는 다시 쓰지 않는다. 같은 번호가 다른 주제를 가리키면 헷갈린다
             nextNo: no + 1,
           })
@@ -709,7 +893,7 @@ export const register: Register = on => {
             line = '본문을 붙일 항목이 없다'
             break
           }
-          line = `본문 저장 (/recall ${cur.no}.${i + 1})`
+          line = `본문 저장 (/recall ${cur.id}.${i + 1})`
           await save($, put({ ...cur, notes: { ...cur.notes, [String(i)]: input.text ?? '' } }))
           break
         }
@@ -718,18 +902,30 @@ export const register: Register = on => {
             line = '목차가 없다'
             break
           }
+          // 곁가지도 주제 하나다. 목차를 안 주면 질문 한 줄이 한 칸짜리 목차가 된다
           const label = input.label ?? '곁가지'
-          line = `곁가지 열림 — ${label}`
-          await save($, put({ ...cur, branches: [...cur.branches, label] }))
+          const items = input.items && input.items.length > 0 ? input.items : [label]
+          // 큰 주제 번호는 건드리지 않는다. 곁가지는 부모 이름 뒤 빈 글자를 받는다
+          const id = nextBranchId(all, cur.id)
+          if (!id) {
+            line = `${cur.id} 의 곁가지가 26개를 넘었다 — 하나를 지우거나 새 주제로 연다`
+            break
+          }
+          const at = Math.max(0, cur.cursor)
+          line = `곁가지 열림 — ${label} (/recall ${id})`
+          await save($, put({ ...startTrail(label, id, items), parent: { id: cur.id, at } }))
           break
         }
         case 'pop': {
-          if (!cur || cur.branches.length === 0) {
+          const up = cur?.parent ? all.byTopic[cur.parent.id] : undefined
+          if (!cur || !up) {
             line = '닫을 곁가지 없음'
             break
           }
-          line = `곁가지 닫음 — ${cur.branches[cur.branches.length - 1]}`
-          await save($, put({ ...cur, branches: cur.branches.slice(0, -1) }))
+          // 곁가지는 지우지 않는다. 지금 자리만 부모로 돌린다 — 나중에 /recall 로 다시 본다
+          line = `곁가지 닫음 — ${cur.title} (/recall ${cur.id})`
+          await save($, put(up))
+          await update($, armed, () => false)
           break
         }
         case 'clear': {
@@ -738,7 +934,7 @@ export const register: Register = on => {
             break
           }
           line = `"${cur.title}" 지움`
-          await save($, without(all, String(cur.no)))
+          await save($, without(all, cur.id))
           break
         }
         default: {
@@ -774,9 +970,11 @@ export const register: Register = on => {
     const all = await read($, trails)
     const cur = currentOf(all)
     const stale = staleOf(all)
+    // 곁가지는 지금 주제 안에 한 줄씩 그려진다. 아래 목록에는 맨 위 주제만 둔다
+    const top = cur ? rootOf(all, cur) : undefined
     const others = Object.values(all.byTopic)
-      .filter(t => String(t.no) !== all.current)
-      .sort((a, b) => a.no - b.no)
+      .filter(t => !t.parent && t.id !== top?.id)
+      .sort(byId)
 
     if (!cur && others.length === 0) {
       return (
@@ -796,7 +994,13 @@ export const register: Register = on => {
       await save($, without(await read($, trails), key))
     }
 
-    const folded = cur ? all.collapsed.includes(String(cur.no)) : false
+    const folded = cur ? all.collapsed.includes(cur.id) : false
+
+    /** 그 주제로 옮긴다 */
+    const go = async (id: string) => {
+      const now = await read($, trails)
+      await save($, { ...now, current: id })
+    }
 
     /** 접거나 편다 */
     const fold = async (key: string) => {
@@ -808,51 +1012,67 @@ export const register: Register = on => {
       })
     }
 
+    const up = cur?.parent ? all.byTopic[cur.parent.id] : undefined
+
     return (
       <Box flexDirection="column">
         {cur && (
           <Box flexDirection="column">
-            {/* 주제 줄만 오갈 수 있다. 항목은 글로 둔다 — 눌러 봐야 본문을 띄울 길이
-                없으니(버튼에서 대화에 글을 넣지 못한다) 단추로 두면 눌러도 아무 일이
-                없는 줄이 아홉 개 생긴다. 본문은 /recall 로 받는다 */}
+            {/* 지금 있는 목차 하나만 그린다. 부모와 곁가지를 같이 펼치면 한 단계 들어갈
+                때마다 패널이 길어지고 들여쓰기만큼 글이 잘렸다(2026-10-14). 어디서 왔는지는
+                머리줄 경로가 말한다 — 몇 단계를 들어가도 패널 모양은 같다.
+                주제·곁가지·돌아가기 줄만 누를 수 있다. 항목은 글로 둔다 — 눌러 봐야 본문을
+                띄울 길이 없다(버튼에서 대화에 글을 넣지 못한다). 본문은 /recall 로 받는다 */}
             <Box>
               <Button
-                key={`fold-${cur.no}`}
+                key={`fold-${cur.id}`}
                 plain
                 autoFocus
-                label={`${folded ? '▸' : '▾'} ${cur.no}. ${cur.title}`}
-                onPress={() => fold(String(cur.no))}
+                label={`${folded ? '▸' : '▾'} ${crumbOf(all, cur)}`}
+                onPress={() => fold(cur.id)}
               />
               <Button
-                key={`x-${cur.no}`}
+                key={`x-${cur.id}`}
                 plain
                 dimColor
                 label="  ✕"
-                onPress={() => drop(String(cur.no))}
+                onPress={() => drop(cur.id)}
               />
             </Box>
 
             {!folded &&
-              cur.items.map((item, i) => {
+              cur.items.flatMap((item, i) => {
                 const isNow = i === cur.cursor
                 const isDone = cur.done.includes(i)
                 const mark = isDone ? '✓' : isNow ? '▸' : ' '
                 // 점(●)은 "본문이 저장돼 있다" — /recall 로 꺼낼 것이 있다는 표시다
                 const dot = cur.notes?.[String(i)] ? '  ●' : ''
-                return (
-                  <Text dimColor={isDone && !isNow}>
-                    {`${mark} ${cur.no}.${i + 1} ${item}${dot}${isNow ? '  ← 지금' : ''}`}
+                const row = (
+                  <Text key={`i-${cur.id}-${i}`} dimColor={isDone && !isNow}>
+                    {`${mark} ${cur.id}.${i + 1} ${item}${dot}${isNow ? '  ← 지금' : ''}`}
                   </Text>
                 )
+                // 여기서 갈라진 곁가지는 제목 한 줄씩만. 펼치지 않는다 — 들어가서 본다
+                const kids = childrenAt(all, cur.id, i).map(c => (
+                  <Button
+                    key={`b-${c.id}`}
+                    plain
+                    dimColor
+                    label={`    ↳ ${c.id}. ${c.title}${c.items.length > 1 ? ` (${c.items.length})` : ''}`}
+                    onPress={() => go(c.id)}
+                  />
+                ))
+                return [row, ...kids]
               })}
 
-            {!folded && cur.branches.length > 0 && (
-              <Box flexDirection="column" paddingTop={1}>
-                <Text dimColor>곁가지 (답하면 위로 돌아감)</Text>
-                {cur.branches.map((b, i) => (
-                  <Text dimColor>{`${'  '.repeat(i)}└ ${b}`}</Text>
-                ))}
-              </Box>
+            {!folded && up && (
+              <Button
+                key={`up-${up.id}`}
+                plain
+                dimColor
+                label={`↰ ${up.id}.${(cur.parent?.at ?? 0) + 1} 로 돌아가기`}
+                onPress={() => go(up.id)}
+              />
             )}
           </Box>
         )}
@@ -863,21 +1083,21 @@ export const register: Register = on => {
           <Box flexDirection="column" paddingTop={1}>
             <Text dimColor>{`${STALE_DAYS}일 넘게 안 본 주제 — 지울까요?`}</Text>
             {stale.map(t => (
-              <Box key={`stale-${t.no}`}>
+              <Box key={`stale-${t.id}`}>
                 <Button
-                  key={`drop-${t.no}`}
+                  key={`drop-${t.id}`}
                   plain
-                  label={`  ✕ ${t.no}. ${t.title} (${agoOf(t.touchedAt)})`}
-                  onPress={() => drop(String(t.no))}
+                  label={`  ✕ ${t.id}. ${t.title} (${agoOf(t.touchedAt)})`}
+                  onPress={() => drop(t.id)}
                 />
                 <Button
-                  key={`keep-${t.no}`}
+                  key={`keep-${t.id}`}
                   plain
                   dimColor
                   label="   두기"
                   onPress={async () => {
                     const now = await read($, trails)
-                    await save($, { ...now, kept: [...now.kept, String(t.no)] })
+                    await save($, { ...now, kept: [...now.kept, t.id] })
                   }}
                 />
               </Box>
@@ -890,23 +1110,20 @@ export const register: Register = on => {
         {others.length > 0 && (
           <Box flexDirection="column" paddingTop={1}>
             {others.map(t => (
-              <Box key={`row-${t.no}`}>
+              <Box key={`row-${t.id}`}>
                 <Button
-                  key={`go-${t.no}`}
+                  key={`go-${t.id}`}
                   plain
                   dimColor
-                  label={`▸ ${t.no}. ${t.title}`}
-                  onPress={async () => {
-                    const now = await read($, trails)
-                    await save($, { ...now, current: String(t.no) })
-                  }}
+                  label={`▸ ${t.id}. ${t.title}`}
+                  onPress={() => go(t.id)}
                 />
                 <Button
-                  key={`gx-${t.no}`}
+                  key={`gx-${t.id}`}
                   plain
                   dimColor
                   label="  ✕"
-                  onPress={() => drop(String(t.no))}
+                  onPress={() => drop(t.id)}
                 />
               </Box>
             ))}
@@ -915,26 +1132,29 @@ export const register: Register = on => {
 
         {/* 쓸 수 있는 말을 상자에 모은다. 목차 줄들과 섞여 흐르면 안내인지 항목인지
             구분이 안 된다 — 테두리가 그 경계를 긋는다 */}
-        {/* 설명과 명령을 두 칸으로 나눈다. 공백으로 줄을 맞추면 한글·"—"·"·" 의 폭을
+        {/* 명령과 설명을 두 칸으로 나눈다. 공백으로 줄을 맞추면 한글·"—"·"·" 의 폭을
             사람이 세야 하는데, 터미널마다 달라 어긋났다(2026-10-13). 왼쪽 칸 폭을 고정해
-            엔진이 재게 한다 */}
+            엔진이 재게 한다.
+            명령(영문)을 왼쪽에 둔다. 설명을 왼쪽에 두니 오른쪽 칸이 "/" 로 시작하는 줄과
+            한글로 시작하는 줄이 섞였고, 칸은 맞아도 글자 모양 탓에 한글 줄이 한 칸 당겨져
+            보였다. 오른쪽 칸을 전부 한글로 시작하게 하면 그런 줄이 없다 */}
         <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1} marginTop={1}>
           <Text dimColor>{all.on ? '쌓는 중' : '멈춤'}</Text>
           {[
-            all.on ? ['그만 쌓기', '/trail off'] : ['다시 쌓기', '/trail'],
-            ['설명을 대화로 받기', '/recall 1.2'],
-            ['  주제 전체', '/recall 1'],
-            ['  여러 항목', '/recall 1.1,3  1.2-4'],
-            ['주제 지우기', '/trail drop 1'],
-            ['패널 닫기', '/trail close'],
-            ['이 패널로 들어오기', 'ctrl+x 누르고 tab'],
-            ['  주제 줄에서 Enter', '접기 · 펴기 · 주제 바꾸기'],
-          ].map(([label, how]) => (
-            <Box key={label} flexDirection="row">
-              <Box width={HELP_LABEL} flexShrink={0}>
-                <Text dimColor>{label}</Text>
+            all.on ? ['/trail off', '그만 쌓기'] : ['/trail', '다시 쌓기'],
+            ['/recall 1.2', '설명 하나 받기'],
+            ['/recall 1', '주제 전체 받기'],
+            ['/recall 1.1,3  1.2-4', '여러 항목 · 범위'],
+            ['/trail drop 1', '주제 지우기'],
+            ['/trail close', '패널 닫기'],
+            [focusKey, '패널로 들어오기'],
+            ['Enter', '주제 접기 · 펴기 · 바꾸기'],
+          ].map(([how, what]) => (
+            <Box key={how} flexDirection="row">
+              <Box width={HELP_HOW} flexShrink={0}>
+                <Text dimColor>{how}</Text>
               </Box>
-              <Text dimColor>{how}</Text>
+              <Text dimColor>{what}</Text>
             </Box>
           ))}
         </Box>

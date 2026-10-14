@@ -1,6 +1,6 @@
 {
   "name": "learn-trail",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "설명의 목차·현재 위치·곁가지를 패널에 띄우고, 항목별 설명을 저장해 /recall 로 그대로 다시 본다",
   "author": { "name": "UlongChaS2" },
   "homepage": "https://github.com/UlongChaS2/learn-trail-mods",

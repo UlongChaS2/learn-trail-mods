@@ -1,6 +1,19 @@
 import { test, expect } from 'claude-code/testing'
 
-import { captureTarget, migrate, parseArgs, parsePicks, splitSections, staleOf, without } from './register'
+import {
+  captureTarget,
+  crumbOf,
+  focusKeyOf,
+  migrate,
+  nextBranchId,
+  parseArgs,
+  parsePicks,
+  rootOf,
+  splitSections,
+  staleOf,
+  statusOf,
+  without,
+} from './register'
 
 const TOOL = 'mcp__learn-trail__trail'
 
@@ -30,16 +43,41 @@ test('set 이 목차를 깔고 부를 이름을 만든다', async $ => {
   expect(res.text).toContain('/recall 1.1')
 })
 
-/** 곁가지는 쌓이고, 답하면 빠진다 — 이게 이 mod 를 만든 이유다 */
-test('push 로 곁가지를 쌓고 pop 으로 돌아온다', async $ => {
+/**
+ * 곁가지는 주제 하나로 남는다 — 닫아도 /recall 로 다시 본다.
+ *
+ * 예전에는 이름표만 쌓고 pop 하면 그마저 지웠다. 곁가지 답은 다시 볼 길이 없었다(2026-10-14).
+ */
+test('push 로 곁가지 주제를 열고 pop 으로 부모에 돌아온다', async $ => {
   await run($, 'trail')
   await $.tool.call({ tool: TOOL, action: 'set', title: 'x y', items: ['하나', '둘'] })
 
   const pushed = await $.tool.call({ tool: TOOL, action: 'push', label: '커넥션 풀이 뭔지' })
   expect(pushed.text).toContain('곁가지 열림')
+  // 곁가지는 큰 주제 번호를 가져가지 않는다 — 1번에서 갈라졌으니 1a
+  expect(pushed.text).toContain('/recall 1a')
 
   const popped = await $.tool.call({ tool: TOOL, action: 'pop' })
   expect(popped.text).toContain('곁가지 닫음')
+
+  // 지금 자리는 부모다 — 다음 곁가지는 또 부모에서 갈라진다
+  const bare = await run($, 'recall')
+  expect(bare.text).toContain('x y — 1. 하나')
+
+  // 닫은 뒤에도 남아 있고, 어디서 갈라졌는지 말한다. 한 칸짜리면 질문이 곧 항목이다
+  const again = await run($, 'recall', '1a')
+  expect(again.text).toContain('1.1 의 곁가지')
+  expect(again.text).toContain('1. 커넥션 풀이 뭔지')
+})
+
+/** 곁가지 답이 여러 항목이면 곁가지도 목차를 갖는다 */
+test('push 에 items 를 주면 곁가지 목차가 된다', async $ => {
+  await run($, 'trail')
+  await $.tool.call({ tool: TOOL, action: 'set', title: 'nginx', items: ['하나', '둘'] })
+  await $.tool.call({ tool: TOOL, action: 'push', label: '톰캣은 왜', items: ['목적', '스레드', '장애'] })
+
+  const res = await run($, 'recall', '1a.3')
+  expect(res.text).toContain('톰캣은 왜 (1.1 의 곁가지) — 3. 장애')
 })
 
 /** 닫을 것이 없을 때 터지지 않는다 */
@@ -224,7 +262,7 @@ test('번호 없던 옛 주제에 번호를 매겨 살린다', async () => {
 
   const now = migrate(old as never)
 
-  expect(now.byTopic['1']?.no).toBe(1)
+  expect(now.byTopic['1']?.id).toBe('1')
   expect(now.current).toBe('1')
   expect(now.byTopic['1']?.notes['1']).toContain('옛 본문')
   // 손댄 때가 없던 것을 바로 "묵었다" 고 묻지 않는다
@@ -254,13 +292,12 @@ const NOW = Date.UTC(2026, 9, 12)
 /** 테스트용 주제 하나. 필요한 칸만 바꿔 쓴다 */
 const topic = (no: number, over: Record<string, unknown> = {}) => ({
   title: `주제${no}`,
-  no,
+  id: String(no),
   slug: `t${no}`,
   items: ['가', '나', '다'],
   cursor: 0,
   done: [] as number[],
   notes: {} as Record<string, string>,
-  branches: [] as string[],
   touchedAt: NOW,
   ...over,
 })
@@ -285,8 +322,8 @@ test('묵은 주제 — 두기를 고른 것과 지금 주제는 묻지 않는�
     },
   }
 
-  const asked = staleOf(all as never, NOW).map(t => t.no)
-  expect(asked).toEqual([3])
+  const asked = staleOf(all as never, NOW).map(t => t.id)
+  expect(asked).toEqual(['3'])
 })
 
 test('묵은 주제 — 7일이 안 됐으면 묻지 않는다', async () => {
@@ -298,19 +335,46 @@ test('묵은 주제 — 7일이 안 됐으면 묻지 않는다', async () => {
 })
 
 /**
- * 곁가지 답이 원래 본문을 덮어쓰면 안 된다.
+ * 곁가지 답은 곁가지에 담기고 부모 본문은 그대로다.
  *
- * 곁가지가 열린 동안의 답은 곁가지 질문에 대한 것이다. 그걸 지금 항목에 담으면
- * /recall 했을 때 원래 설명 대신 곁가지 답이 나온다.
+ * 부모를 덮어쓰면 /recall 했을 때 원래 설명 대신 곁가지 답이 나온다. 곁가지가 지금 주제가
+ * 되므로 담는 곳이 처음부터 다르다.
  */
-test('곁가지가 열려 있으면 본문으로 담지 않는다', async () => {
-  const base = { on: true, nextNo: 2, collapsed: [], current: '1', kept: [] }
+test('곁가지에 들어가 있으면 곁가지에 담는다', async () => {
+  const base = { on: true, nextNo: 3, collapsed: [], kept: [] }
+  const byTopic = { '1': topic(1), '2': topic(2, { id: '2', items: ['톰캣'], parent: { id: '1', at: 0 } }) }
 
-  const plain = { ...base, byTopic: { '1': topic(1) } }
-  expect(captureTarget(plain as never, true)?.no).toBe(1)
+  expect(captureTarget({ ...base, current: '1', byTopic } as never, true)?.id).toBe('1')
+  expect(captureTarget({ ...base, current: '2', byTopic } as never, true)?.id).toBe('2')
+})
 
-  const branching = { ...base, byTopic: { '1': topic(1, { branches: ['SqlSession 이 뭔지'] }) } }
-  expect(captureTarget(branching as never, true)).toBeUndefined()
+/** 주제를 지우면 거기서 갈라진 곁가지도 같이 지운다. 지우던 곁가지면 부모로 돌아간다 */
+test('곁가지는 주제와 함께 지워진다', async () => {
+  const byTopic = {
+    '1': topic(1),
+    '1a': topic(1, { id: '1a', parent: { id: '1', at: 0 } }),
+    '1aa': topic(1, { id: '1aa', parent: { id: '1a', at: 1 } }),
+    '2': topic(2),
+  }
+  const all = { on: true, nextNo: 3, collapsed: ['1aa'], current: '1aa', kept: [], byTopic }
+
+  expect(rootOf(all as never, byTopic['1aa'] as never).id).toBe('1')
+
+  const gone = without(all as never, '1')
+  expect(Object.keys(gone.byTopic)).toEqual(['2'])
+  expect(gone.collapsed).toEqual([])
+
+  const leaf = without(all as never, '1aa')
+  expect(leaf.current).toBe('1a')
+})
+
+/** 이름표로 쌓던 옛 곁가지는 버린다 — 열린 채 남아 있으면 그 주제 답이 영영 안 담겼다 */
+test('옛 branches 칸을 걷어 낸다', async () => {
+  const old = { on: true, nextNo: 2, collapsed: [], kept: [], current: '1',
+    byTopic: { '1': { ...topic(1), branches: ['5432가 밖으로 열렸다'] } } }
+  const now = migrate(old as never)
+  expect('branches' in (now.byTopic['1'] ?? {})).toBe(false)
+  expect(now.byTopic['1']?.id).toBe('1')
 })
 
 test('꺼져 있거나 목차가 끝났으면 담지 않는다', async () => {
@@ -468,7 +532,7 @@ test('표시 없는 머리말만 있는 답도 나눈다', async () => {
 test('이번 턴에 trail 을 안 불렀으면 본문으로 담지 않는다', async () => {
   const all = { on: true, nextNo: 2, collapsed: [], current: '1', kept: [], byTopic: { '1': topic(1) } }
   expect(captureTarget(all as never, false)).toBeUndefined()
-  expect(captureTarget(all as never, true)?.no).toBe(1)
+  expect(captureTarget(all as never, true)?.id).toBe('1')
 })
 
 test('항목 번호 묶음을 읽는다', () => {
@@ -541,4 +605,88 @@ test('/recall 을 못 읽으면 쓰는 법을 알려 준다', async $ => {
   const res = await run($, 'recall', '1.3-1')
   expect(res.text).toContain('읽을 수 없습니다')
   expect(res.text).toContain('1.1,3')
+})
+
+/**
+ * 몇 단계를 들어가도 패널 머리줄은 한 줄이다.
+ *
+ * 처음에는 부모 목차 안에 곁가지 목차를 들여 펼쳤다. 한 단계마다 길어지고 글이 잘렸다
+ * (2026-10-14). 지금 목차만 그리고 어디서 왔는지는 경로로 말한다.
+ */
+test('경로는 맨 위부터 지금까지, 길면 가운데를 줄인다', async () => {
+  const at = (id: string, title: string, parent?: string, over: Record<string, unknown> = {}) =>
+    topic(1, { id, title, ...(parent ? { parent: { id: parent, at: 0 } } : {}), ...over })
+  const chain = {
+    '1': at('1', 'nginx와 리버스 프록시'),
+    '1a': at('1a', '톰캣은 왜 안 되나', '1'),
+    '1aa': at('1aa', '스레드', '1a'),
+    '1aaa': at('1aaa', 'NIO', '1aa'),
+    '1aaab': at('1aaab', '이벤트 루프', '1aaa', { cursor: 1 }),
+  }
+  const all = { on: true, nextNo: 2, collapsed: [], kept: [], current: '1a', byTopic: chain }
+
+  expect(crumbOf(all as never, chain['1a'] as never)).toBe('1. nginx와 리버스 프… › 1a. 톰캣은 왜 안 되나')
+  expect(crumbOf(all as never, chain['1aaab'] as never)).toBe('1. nginx와 리버스 프… › … › 1aaa. NIO › 1aaab. 이벤트 루프')
+  // 곁가지 이름에 어디서 왔는지가 이미 들어 있다
+  expect(statusOf({ ...all, current: '1aaab' } as never)).toBe('학습 1aaab.2')
+  expect(statusOf({ ...all, on: false } as never)).toBeUndefined()
+})
+
+/**
+ * 곁가지는 큰 주제 번호를 잡아먹지 않고, 지운 글자는 다시 채운다.
+ *
+ * 곁가지가 번호를 받던 때는 1, 2 다음 주제가 4 였다. 2b 를 지우고 새로 열면 2c 가 아니라
+ * 2b 다 — 건너뛰면 왜 b 가 없는지 묻게 된다(2026-10-14).
+ */
+test('곁가지는 2a · 2b 로, 지운 자리를 채운다', async $ => {
+  await run($, 'trail')
+  await $.tool.call({ tool: TOOL, action: 'set', title: '하나', items: ['가'] })
+  await $.tool.call({ tool: TOOL, action: 'set', title: '둘', items: ['가', '나'] })
+
+  expect((await $.tool.call({ tool: TOOL, action: 'push', label: '첫 곁가지' })).text).toContain('/recall 2a')
+  await $.tool.call({ tool: TOOL, action: 'pop' })
+  expect((await $.tool.call({ tool: TOOL, action: 'push', label: '둘째' })).text).toContain('/recall 2b')
+  await $.tool.call({ tool: TOOL, action: 'pop' })
+
+  // 큰 주제는 3번으로 이어진다
+  expect((await $.tool.call({ tool: TOOL, action: 'set', title: '셋', items: ['가'] })).text).toContain('/recall 3.1')
+
+  // 2b 를 지우면 다음 곁가지가 다시 2b
+  expect((await run($, 'trail', 'drop 2b')).text).toContain('2b. 둘째')
+  await run($, 'recall', '2.1')
+  expect((await $.tool.call({ tool: TOOL, action: 'push', label: '새 둘째' })).text).toContain('/recall 2b')
+})
+
+test('비어 있는 첫 글자를 고른다', async () => {
+  const all = { on: true, nextNo: 3, collapsed: [], kept: [], current: '2',
+    byTopic: { '2': topic(2), '2a': topic(2, { id: '2a' }), '2c': topic(2, { id: '2c' }) } }
+  expect(nextBranchId(all as never, '2')).toBe('2b')
+  expect(nextBranchId(all as never, '2a')).toBe('2aa')
+})
+
+/** 곁가지가 번호를 받던 때의 저장 — 3번이던 곁가지는 2a 가 되고 다음 큰 주제는 3번이다 */
+test('번호를 받던 곁가지를 2a 로 옮긴다', async () => {
+  const old = {
+    on: true, nextNo: 4, collapsed: ['3'], kept: [], current: '3',
+    byTopic: {
+      '1': { ...topic(1), no: 1, id: undefined },
+      '2': { ...topic(2), no: 2, id: undefined },
+      '3': { ...topic(3), no: 3, id: undefined, parent: { no: 2, at: 5 } },
+    },
+  }
+  const now = migrate(old as never)
+  expect(Object.keys(now.byTopic).sort()).toEqual(['1', '2', '2a'])
+  expect(now.byTopic['2a']?.parent).toEqual({ id: '2', at: 5 })
+  expect('no' in (now.byTopic['2a'] ?? {})).toBe(false)
+  expect(now.current).toBe('2a')
+  expect(now.collapsed).toEqual(['2a'])
+  expect(now.nextNo).toBe(3)
+})
+
+/** 안내 상자의 "패널로 들어오기" 키는 사람이 바꿔 둔 키를 따른다 */
+test('바꿔 둔 패널 키를 읽고, 없으면 기본 키다', async () => {
+  expect(focusKeyOf(undefined)).toBe('ctrl+x, tab')
+  expect(focusKeyOf({ bindings: [] })).toBe('ctrl+x, tab')
+  expect(focusKeyOf({ bindings: [{ context: 'Chat', bindings: { 'alt+g': 'abovePrompt:focus' } }] })).toBe('alt+g')
+  expect(focusKeyOf({ bindings: [{ context: 'Chat', bindings: { 'ctrl+k tab': 'abovePrompt:focus' } }] })).toBe('ctrl+k, tab')
 })

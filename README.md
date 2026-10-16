@@ -53,6 +53,9 @@ instructions given to Claude are currently in **Korean**.</sub>
 
 ## Installation
 
+> Installing for the first time, or walking a teammate through it? See the **[install guide](https://claude.ai/artifact/Q7BiQPcL7Z6TkbUcAQtPyc#en)**:
+> prerequisites, three steps with copy buttons, common problems, and updating or removing, on one page.
+
 In a Claude Code **terminal** session, type:
 
 ```

@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-d97757.svg)](https://claude.com/claude-code)
-![Version](https://img.shields.io/badge/version-0.3.0-informational.svg)
+![Version](https://img.shields.io/badge/version-0.3.1-informational.svg)
 
 > A table of contents for long explanations in [Claude Code](https://claude.com/claude-code) —
 > every section is saved exactly as written, so you can replay it later with `/recall`.

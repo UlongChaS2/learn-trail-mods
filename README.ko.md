@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-d97757.svg)](https://claude.com/claude-code)
-![Version](https://img.shields.io/badge/version-0.3.0-informational.svg)
+![Version](https://img.shields.io/badge/version-0.3.1-informational.svg)
 
 설명이 길어지면 트리가 되는데, 대화는 한 줄이다. 가지로 내려가면 **돌아올 자리를 잃는다.**
 

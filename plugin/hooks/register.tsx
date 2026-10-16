@@ -996,6 +996,16 @@ export const register: Register = on => {
 
     const folded = cur ? all.collapsed.includes(cur.id) : false
 
+    /**
+     * 입력칸에 `/recall 번호` 를 채운다. 보내는 건 사람이 Enter 로 한다.
+     * 칸이 안 받으면(대화상자가 떠 있거나 입력칸이 없는 세션) 칠 말을 알려 준다
+     */
+    const ask = async (no: string) => {
+      const text = `/recall ${no}`
+      const r = await $.prompt.fill({ text }).catch(() => ({ isFilled: false }))
+      if (!r.isFilled) void $.ui.notify(`${text} 를 치면 그 설명을 다시 봅니다`).catch(() => {})
+    }
+
     /** 그 주제로 옮긴다 */
     const go = async (id: string) => {
       const now = await read($, trails)
@@ -1021,8 +1031,10 @@ export const register: Register = on => {
             {/* 지금 있는 목차 하나만 그린다. 부모와 곁가지를 같이 펼치면 한 단계 들어갈
                 때마다 패널이 길어지고 들여쓰기만큼 글이 잘렸다(2026-10-14). 어디서 왔는지는
                 머리줄 경로가 말한다 — 몇 단계를 들어가도 패널 모양은 같다.
-                주제·곁가지·돌아가기 줄만 누를 수 있다. 항목은 글로 둔다 — 눌러 봐야 본문을
-                띄울 길이 없다(버튼에서 대화에 글을 넣지 못한다). 본문은 /recall 로 받는다 */}
+                항목 줄은 누르면 입력칸에 `/recall 1.3` 을 채운다. Enter 한 번 더로 저장본을 받는다.
+                바로 보내지(prompt.submit) 않는다 — 그건 모델에게 가는 새 턴이라 설명을 다시 쓰고,
+                다시 쓰면 말이 달라진다. 입력칸까지만 가면 /recall 이 저장본을 그대로 꺼낸다
+                (2026-10-16. 그전에는 버튼에서 대화로 가는 길이 없는 줄 알고 글로만 뒀다) */}
             <Box>
               <Button
                 key={`fold-${cur.id}`}
@@ -1048,9 +1060,13 @@ export const register: Register = on => {
                 // 점(●)은 "본문이 저장돼 있다" — /recall 로 꺼낼 것이 있다는 표시다
                 const dot = cur.notes?.[String(i)] ? '  ●' : ''
                 const row = (
-                  <Text key={`i-${cur.id}-${i}`} dimColor={isDone && !isNow}>
-                    {`${mark} ${cur.id}.${i + 1} ${item}${dot}${isNow ? '  ← 지금' : ''}`}
-                  </Text>
+                  <Button
+                    key={`i-${cur.id}-${i}`}
+                    plain
+                    dimColor={isDone && !isNow}
+                    label={`${mark} ${cur.id}.${i + 1} ${item}${dot}${isNow ? '  ← 지금' : ''}`}
+                    onPress={() => ask(`${cur.id}.${i + 1}`)}
+                  />
                 )
                 // 여기서 갈라진 곁가지는 제목 한 줄씩만. 펼치지 않는다 — 들어가서 본다
                 const kids = childrenAt(all, cur.id, i).map(c => (
@@ -1148,7 +1164,7 @@ export const register: Register = on => {
             ['/trail drop 1', '주제 지우기'],
             ['/trail close', '패널 닫기'],
             [focusKey, '패널로 들어오기'],
-            ['Enter', '주제 접기 · 펴기 · 바꾸기'],
+            ['Enter', '주제 접기 · 바꾸기 · 항목 다시 보기'],
           ].map(([how, what]) => (
             <Box key={how} flexDirection="row">
               <Box width={HELP_HOW} flexShrink={0}>

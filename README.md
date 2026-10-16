@@ -37,7 +37,7 @@ recording
 /trail drop 1          delete a topic
 /trail close           close the pane
 ctrl+x, tab            focus the pane
-Enter                  fold · unfold · switch topic
+Enter                  fold · switch topic · replay section
 ```
 
 <sub>Illustration translated for this README. The pane, commands' messages and the
@@ -145,8 +145,9 @@ it). Takes effect in a new session.
 
 ## Limitations
 
-- Section rows in the pane are not clickable: a plugin button can't post text into the
-  conversation, so replay goes through `/recall`.
+- Pressing Enter on a section row fills `/recall 1.3` into the prompt box rather than sending it.
+  Sending it straight away would start a model turn that rewrites the explanation; one more Enter
+  replays the saved text verbatim.
 - Number shortcuts go up to 9. An outline longer than nine sections is a sign the explanation is
   too long anyway.
 - UI text and the instructions given to Claude are Korean only, for now.

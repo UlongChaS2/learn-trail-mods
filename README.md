@@ -131,6 +131,41 @@ it). Takes effect in a new session.
 { "bindings": [{ "context": "Chat", "bindings": { "alt+g": "abovePrompt:focus" } }] }
 ```
 
+#### When the pane key stops working under a non-Latin input source
+
+With a Korean (or any non-Latin) input source active, `alt+g` may not focus the pane, and you have
+to switch back to English first. If toggling the input source every time gets old, read on.
+
+**Why.** Under a non-Latin input source the terminal sends the character the key types (`ㅎ`),
+not "the G key". Claude doesn't read `alt+ㅎ` as `alt+g`. It isn't only alt: through tmux, herdr
+and the like, ctrl combinations break the same way. Keybindings alone can't fix it; the terminal has
+to send the Latin key **by physical key position**. In Ghostty, for example:
+
+```
+keybind = alt+key_g=esc:g
+```
+
+Terminals and multiplexers differ from person to person, so paste the prompt below into Claude.
+It finds the cause first, then fixes it. Afterwards the same key focuses the pane whichever input
+source is on.
+
+```
+The key that focuses the learn-trail pane (abovePrompt:focus in ~/.claude/keybindings.json)
+doesn't work while a non-Latin input source (e.g. Korean) is active. Fix it in this order.
+
+1. Find out which terminal I use and anything in between (tmux, herdr, zellij, ...).
+2. Before changing anything, have me run learn-trail's scripts/keycap.py
+   (if installed: ~/.claude/plugins/marketplaces/learn-trail/scripts/keycap.py) to see the
+   exact bytes that key produces. I'll press it with each input source and paste the output.
+3. If the non-Latin input source doesn't send the Latin key code, make the terminal send that
+   key by physical key position. If something in between drops it, look there too.
+4. Back up any config file, show me what you'll change, and wait for my OK.
+5. Afterwards, run keycap.py again and confirm the Latin key code arrives.
+```
+
+Step 2 is the point: measure before changing anything. The bytes tell you the cause right away
+(under Korean, `alt+ㅎ` shows up as `ESC[12622;3u`; `alt+g` as `ESC[103;3u`).
+
 ## How it works
 
 - **Outline** — the mod registers a `trail` tool and, only while on, adds a short paragraph to the

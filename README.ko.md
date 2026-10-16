@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-d97757.svg)](https://claude.com/claude-code)
-![Version](https://img.shields.io/badge/version-0.3.0-informational.svg)
+![Version](https://img.shields.io/badge/version-0.3.1-informational.svg)
 
 설명이 길어지면 트리가 되는데, 대화는 한 줄이다. 가지로 내려가면 **돌아올 자리를 잃는다.**
 
@@ -33,7 +33,7 @@ learn-trail 은 Claude 가 여러 항목으로 나눠 설명할 때 **목차와 
 /trail drop 1          주제 지우기
 /trail close           패널 닫기
 ctrl+x, tab            패널로 들어오기
-Enter                  주제 접기 · 펴기 · 바꾸기
+Enter                  주제 접기 · 바꾸기 · 항목 다시 보기
 ```
 
 ## 설치
@@ -105,16 +105,53 @@ Enter                  주제 접기 · 펴기 · 바꾸기
 
 ### 패널 조작
 
-`ctrl+x` 누르고 `tab` 으로 패널에 들어가, 주제 줄 사이를 오가며 Enter — 지금 주제면 접고 펴고,
-다른 주제면 그쪽으로 옮긴다. `✕` 는 버린다. 7일 넘게 안 본 주제는 켤 때 지울지 묻는다.
+`ctrl+x` 누르고 `tab` 으로 패널에 들어가, 줄 사이를 오가며 Enter — 지금 주제면 접고 펴고,
+다른 주제면 그쪽으로 옮긴다. 항목 줄에서 Enter 하면 입력칸에 `/recall 1.3` 이 채워지고,
+Enter 를 한 번 더 누르면 저장된 본문이 뜬다. `✕` 는 버린다. 7일 넘게 안 본 주제는 켤 때 지울지 묻는다.
 
-**패널 키는 사람마다 바꿀 수 있다.** `ctrl+x` 가 터미널·tmux 같은 다른 도구의 키와 겹치면
-`~/.claude/keybindings.json` 에서 `abovePrompt:focus` 에 원하는 키를 붙인다. 패널 안내 상자도
+**패널 키는 사람마다 바꿀 수 있다.** 기본 키 `ctrl+x, tab` 은 두 번 눌러야 해서 길다. 더 짧은 키를
+쓰고 싶거나 `ctrl+x` 가 터미널·tmux 같은 다른 도구의 키와 겹치면 `~/.claude/keybindings.json` 에서 `abovePrompt:focus` 에 원하는 키를 붙인다. 패널 안내 상자도
 그 키를 읽어 보여 준다(바꾸지 않았으면 기본 키 `ctrl+x, tab`). 세션을 새로 열면 반영된다.
 
 ```json
 { "bindings": [{ "context": "Chat", "bindings": { "alt+g": "abovePrompt:focus" } }] }
 ```
+
+#### 한글 입력 중에 패널 키가 안 먹을 때
+
+한글 상태에서 `alt+g` 를 누르면 패널로 안 들어가고, 영문으로 바꿔야만 들어갈 수 있다.
+패널에 들어갈 때마다 한/영 전환을 누르는 게 귀찮다면 아래를 읽는다.
+
+**왜 그런가.** 한글 상태에서는 터미널이 "G 자리 키" 가 아니라 `ㅎ` 이라는 글자를 보낸다.
+Claude 는 `alt+ㅎ` 을 `alt+g` 로 알아듣지 못한다. 이건 alt 만의 문제가 아니다. tmux·herdr 같은
+도구를 거치면 ctrl 조합도 같은 식으로 깨진다. 키 설정만으로는 못 고치고, 터미널이 **자판 위치
+기준으로** 영문 키 신호를 보내게 고쳐야 한다. 예를 들어 Ghostty 라면 이렇게 한다.
+
+```
+keybind = alt+key_g=esc:g
+```
+
+터미널과 중간 도구는 사람마다 다르다. 그러니 아래 프롬프트를 Claude 에게 그대로 붙여 넣으면
+Claude 가 먼저 원인을 찾고 고친다. 고친 뒤에는 한/영 상태와 상관없이 같은 키로 패널에
+들어간다.
+
+```
+learn-trail 패널로 들어가는 키(~/.claude/keybindings.json 의 abovePrompt:focus)가
+한글 입력 상태에서 안 먹는다. 아래 순서로 고쳐 줘.
+
+1. 내가 쓰는 터미널과, 그 사이에 낀 것(tmux·herdr·zellij 등)을 확인해.
+2. 고치기 전에 learn-trail 의 scripts/keycap.py
+   (설치했다면 ~/.claude/plugins/marketplaces/learn-trail/scripts/keycap.py)로
+   그 키가 실제로 어떤 바이트로 들어오는지 찍게 해 줘. 내가 영문·한글 상태에서 각각
+   눌러 결과를 붙일게.
+3. 한글 상태에서 영문 글자 코드가 안 오면, 터미널 설정에서 "자판 위치(물리 키)" 기준으로
+   그 키를 영문 키 신호로 바꿔 보내게 해. 중간 도구가 막고 있으면 그쪽도 봐.
+4. 설정 파일은 백업하고, 무엇을 바꿀지 먼저 보여 준 뒤 내 허락을 받고 고쳐.
+5. 고친 뒤 keycap.py 로 다시 찍어서 영문 코드가 오는지 확인해.
+```
+
+추측으로 고치지 말고 2번에서 먼저 찍어 보는 게 핵심이다. 실제로 들어오는 바이트를 보면
+원인이 바로 갈린다(한글 상태의 `alt+ㅎ` 은 `ESC[12622;3u` 로, `alt+g` 는 `ESC[103;3u` 로 찍힌다).
 
 ## 어떻게 동작하나
 
@@ -130,8 +167,8 @@ Enter                  주제 접기 · 펴기 · 바꾸기
 
 ## 한계
 
-- 패널의 항목 줄은 눌러도 본문이 뜨지 않는다. 플러그인 버튼에서 대화에 글을 넣을 길이 없어서다 —
-  본문은 `/recall` 로 받는다.
+- 패널의 항목 줄은 바로 본문을 띄우지 않고 입력칸에 `/recall` 을 채우기까지만 한다. 바로 보내면
+  모델에게 가는 새 턴이 되어 설명을 다시 쓰기 때문이다 — 저장본을 그대로 받으려면 Enter 를 한 번 더.
 - 숫자 단축키는 1~9 까지. 목차가 아홉을 넘으면 애초에 설명이 너무 길다는 신호다.
 - 안내 문구와 모델에게 주는 지시가 한국어다.
 

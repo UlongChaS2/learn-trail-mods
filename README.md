@@ -122,8 +122,9 @@ you back. However deep you go, the pane keeps the same shape. The status line sh
 
 ### Changing the pane key
 
-Everyone can pick their own key for focusing the pane. If `ctrl+x` clashes with your terminal,
-tmux or another tool, bind any key to `abovePrompt:focus` in `~/.claude/keybindings.json`. The
+Everyone can pick their own key for focusing the pane. The default `ctrl+x, tab` takes two
+presses; if you want something shorter, or `ctrl+x` clashes with your terminal, tmux or another
+tool, bind any key to `abovePrompt:focus` in `~/.claude/keybindings.json`. The
 help box in the pane reads it and shows your key (the default `ctrl+x, tab` if you haven't changed
 it). Takes effect in a new session.
 

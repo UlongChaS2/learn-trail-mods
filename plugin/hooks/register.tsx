@@ -502,6 +502,10 @@ const agoOf = (at: number): string => {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
+    // 세션을 먼저 띄우고 나서 도구를 등록한다. 그 전에 등록하면 세션이 만들어지며
+    // 도구 목록이 다시 짜여 trail 이 모델 목록에서 빠진다 — 명령과 패널은 되는데
+    // 모델이 "No such tool available" 을 받았다(2026-11-02).
+    const started = await next(e)
     try {
       const dir = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${(await $.env.get('HOME')) ?? ''}/.claude`
       focusKey = focusKeyOf(JSON.parse(await $.fs.read(`${dir}/keybindings.json`)))
@@ -558,7 +562,7 @@ export const register: Register = on => {
       },
     })
 
-    return next(e)
+    return started
   })
 
   /**

@@ -8,6 +8,13 @@ const PANE = 'learn-trail'
 /** 패널 안내 상자의 왼쪽(명령) 칸 폭. 가장 긴 "/recall 1.1,3  1.2-4" 가 20칸이다 */
 const HELP_HOW = 22
 
+/**
+ * /recall 의 실제 이름. 다른 플러그인(pstack 의 /pstack:recall)이 같은 이름을 쥐고 있으면
+ * 호스트가 등록을 거부하고, 그 예외가 session.start 를 끊어 trail 도구까지 등록되지 않았다
+ * (2026-11-03). 그때는 /trail-recall 로 물러나고 안내 문구도 이 이름을 쓴다.
+ */
+let recallCommand = '/recall'
+
 /** 패널로 들어오는 엔진 동작. 기본 키는 ctrl+x tab 이다 */
 const FOCUS_ACTION = 'abovePrompt:focus'
 const FOCUS_DEFAULT = 'ctrl+x tab'
@@ -500,11 +507,80 @@ const agoOf = (at: number): string => {
   return days >= 1 ? `${days}일 전` : '오늘'
 }
 
+/**
+ * `/recall` (거부됐으면 `/trail-recall`) 의 본체. 두 이름이 같은 함수를 쓰도록 최상단에 둔다.
+ * 로더가 `$` 를 넘기는 함수는 파일 최상단 선언만 허용한다.
+ *
+ * `/recall hikari 1` · `/recall 1` · `/recall hikari` · `/recall` 을 모두 받는다.
+ * 어느 쪽이 주제고 어느 쪽이 번호인지는 생김새로 가른다 — 순서를 외우게 하지 않는다.
+ */
+const runRecall = async ($: EngineInterface, args: string) => {
+  const all = await read($, trails)
+  const { topic, name, picks, bad } = parseArgs(args)
+
+  if (bad !== undefined) {
+    return { text: `"${bad}" 은 읽을 수 없습니다. 예: ${recallCommand} 1 · 1.2 · 1.1,3 · 1.2-4` }
+  }
+
+  const list = () =>
+    Object.values(all.byTopic)
+      .sort(byId)
+      .map(x => `${x.id}. ${x.title}${fromOf(x)}  (${recallCommand} ${x.id}.1)`)
+
+  let t = currentOf(all)
+  if (topic !== undefined) {
+    t = all.byTopic[topic]
+    if (!t) {
+      return { text: `${topic}${/^\d+$/.test(topic) ? '번' : ''} 주제가 없습니다.\n\n들고 있는 것:\n- ${list().join('\n- ')}` }
+    }
+  } else if (name !== undefined) {
+    // 번호가 기억 안 날 때를 위해 이름도 받는다. 앞부분만 쳐도 찾는다
+    const hit = Object.values(all.byTopic).find(
+      x => x.slug.startsWith(name) || x.title.toLowerCase().includes(name),
+    )
+    if (!hit) {
+      return {
+        text:
+          list().length > 0
+            ? `"${name}" 에 맞는 주제가 없습니다.\n\n들고 있는 것:\n- ${list().join('\n- ')}`
+            : '아직 들고 있는 주제가 없습니다.',
+      }
+    }
+    t = hit
+  }
+
+  if (!t) return { text: '아직 들고 있는 주제가 없습니다.' }
+
+  // 없는 번호면 그렇다고 말한다. 조용히 다른 항목을 보여 주면 그게 맞는 글인 줄 안다
+  const missing = (picks ?? []).filter(i => i < 0 || i >= t.items.length)
+  if (missing.length > 0) {
+    const nos = missing.map(i => i + 1).join(', ')
+    return { text: `${t.id}번 주제에는 ${nos}번 항목이 없습니다 (1 ~ ${t.items.length}).` }
+  }
+
+  // 주제만 짚으면 전체다. 아무것도 안 짚으면 지금 자리 하나
+  const named = topic !== undefined || name !== undefined
+  const want = picks ?? (named ? t.items.map((_, i) => i) : undefined)
+
+  // 여럿을 보여 줄 때는 패널의 "지금" 을 그대로 둔다. 어느 하나로 옮길 근거가 없다
+  if (want && want.length > 1) {
+    await save($, { ...all, current: t.id, byTopic: { ...all.byTopic, [t.id]: touch(t) } })
+    return { text: recallManyText(t, want) }
+  }
+
+  // 부른 자리로 패널의 "지금" 도 옮긴다. 보여 준 것과 패널이 다르면 그게 더 헷갈린다.
+  // 위치와 글은 같은 번호에서 나와야 한다
+  const i = want?.[0] ?? t.cursor
+  await save($, {
+    ...all,
+    current: t.id,
+    byTopic: { ...all.byTopic, [t.id]: touch({ ...t, cursor: i }) },
+  })
+  return { text: recallText(t, i) }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    // 세션을 먼저 띄우고 나서 도구를 등록한다. 그 전에 등록하면 세션이 만들어지며
-    // 도구 목록이 다시 짜여 trail 이 모델 목록에서 빠진다 — 명령과 패널은 되는데
-    // 모델이 "No such tool available" 을 받았다(2026-11-02).
     const started = await next(e)
     try {
       const dir = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${(await $.env.get('HOME')) ?? ''}/.claude`
@@ -512,26 +588,8 @@ export const register: Register = on => {
     } catch {
       // 파일이 없거나 못 읽으면 기본 키 그대로
     }
-    await $.command.register({
-      name: 'trail',
-      description: '학습 경로 패널을 열고 쌓기 시작한다 (close 닫기 · off 그만 · drop N 지움)',
-    })
-    await $.command.register({
-      name: 'recall',
-      description: '지난 설명을 그대로 다시 본다 — /recall 1.2 (패널에 찍힌 번호)',
-    })
-
-    // 지난 세션에서 쌓아 둔 것을 되살린다
-    try {
-      const saved = (await $.store.get(STORE_KEY)) as Trails | undefined
-      if (saved && saved.byTopic) {
-        await update($, trails, () => migrate({ ...EMPTY, ...saved }))
-      }
-    } catch {
-      // 복원 실패는 조용히 넘긴다 — 빈 목차로 시작하면 된다
-    }
-
-    // 모델이 설명하면서 직접 부른다. 사람이 챙길 일이 없어야 한다
+    // 모델이 설명하면서 직접 부른다. 사람이 챙길 일이 없어야 한다.
+    // 명령 등록이 거부되어도 도구는 남도록 명령보다 먼저 등록한다(2026-11-03).
     await $.tool.register({
       name: 'trail',
       description: [
@@ -561,6 +619,33 @@ export const register: Register = on => {
         required: ['action'],
       },
     })
+    await $.command.register({
+      name: 'trail',
+      description: '학습 경로 패널을 열고 쌓기 시작한다 (close 닫기 · off 그만 · drop N 지움)',
+    })
+    try {
+      await $.command.register({
+        name: 'recall',
+        description: '지난 설명을 그대로 다시 본다 — /recall 1.2 (패널에 찍힌 번호)',
+      })
+    } catch {
+      // 다른 플러그인이 /recall 을 쥐고 있다. 물러나되 다시 보기는 잃지 않는다
+      recallCommand = '/trail-recall'
+      await $.command.register({
+        name: 'trail-recall',
+        description: `지난 설명을 그대로 다시 본다 — ${recallCommand} 1.2 (패널에 찍힌 번호)`,
+      })
+    }
+
+    // 지난 세션에서 쌓아 둔 것을 되살린다
+    try {
+      const saved = (await $.store.get(STORE_KEY)) as Trails | undefined
+      if (saved && saved.byTopic) {
+        await update($, trails, () => migrate({ ...EMPTY, ...saved }))
+      }
+    } catch {
+      // 복원 실패는 조용히 넘긴다 — 빈 목차로 시작하면 된다
+    }
 
     return started
   })
@@ -699,7 +784,7 @@ export const register: Register = on => {
     if (words[0] === 'off') {
       const all = await read($, trails)
       await save($, { ...all, on: false })
-      return { text: '그만 쌓습니다. 쌓인 것은 /recall 로 그대로 볼 수 있습니다.' }
+      return { text: `그만 쌓습니다. 쌓인 것은 ${recallCommand} 로 그대로 볼 수 있습니다.` }
     }
 
     if (words[0] === 'drop') {
@@ -747,73 +832,12 @@ export const register: Register = on => {
    * `/recall hikari 1` · `/recall 1` · `/recall hikari` · `/recall` 을 모두 받는다.
    * 어느 쪽이 주제고 어느 쪽이 번호인지는 생김새로 가른다 — 순서를 외우게 하지 않는다.
    */
-  on('command.run', { command: 'recall' }, async ($, e) => {
-    const all = await read($, trails)
-    const { topic, name, picks, bad } = parseArgs(e.args ?? '')
-
-    if (bad !== undefined) {
-      return { text: `"${bad}" 은 읽을 수 없습니다. 예: /recall 1 · 1.2 · 1.1,3 · 1.2-4` }
-    }
-
-    const list = () =>
-      Object.values(all.byTopic)
-        .sort(byId)
-        .map(x => `${x.id}. ${x.title}${fromOf(x)}  (/recall ${x.id}.1)`)
-
-    let t = currentOf(all)
-    if (topic !== undefined) {
-      t = all.byTopic[topic]
-      if (!t) {
-        return { text: `${topic}${/^\d+$/.test(topic) ? '번' : ''} 주제가 없습니다.\n\n들고 있는 것:\n- ${list().join('\n- ')}` }
-      }
-    } else if (name !== undefined) {
-      // 번호가 기억 안 날 때를 위해 이름도 받는다. 앞부분만 쳐도 찾는다
-      const hit = Object.values(all.byTopic).find(
-        x => x.slug.startsWith(name) || x.title.toLowerCase().includes(name),
-      )
-      if (!hit) {
-        return {
-          text:
-            list().length > 0
-              ? `"${name}" 에 맞는 주제가 없습니다.\n\n들고 있는 것:\n- ${list().join('\n- ')}`
-              : '아직 들고 있는 주제가 없습니다.',
-        }
-      }
-      t = hit
-    }
-
-    if (!t) return { text: '아직 들고 있는 주제가 없습니다.' }
-
-    // 없는 번호면 그렇다고 말한다. 조용히 다른 항목을 보여 주면 그게 맞는 글인 줄 안다
-    const missing = (picks ?? []).filter(i => i < 0 || i >= t.items.length)
-    if (missing.length > 0) {
-      const nos = missing.map(i => i + 1).join(', ')
-      return { text: `${t.id}번 주제에는 ${nos}번 항목이 없습니다 (1 ~ ${t.items.length}).` }
-    }
-
-    // 주제만 짚으면 전체다. 아무것도 안 짚으면 지금 자리 하나
-    const named = topic !== undefined || name !== undefined
-    const want = picks ?? (named ? t.items.map((_, i) => i) : undefined)
-
-    // 여럿을 보여 줄 때는 패널의 "지금" 을 그대로 둔다. 어느 하나로 옮길 근거가 없다
-    if (want && want.length > 1) {
-      await save($, { ...all, current: t.id, byTopic: { ...all.byTopic, [t.id]: touch(t) } })
-      return { text: recallManyText(t, want) }
-    }
-
-    // 부른 자리로 패널의 "지금" 도 옮긴다. 보여 준 것과 패널이 다르면 그게 더 헷갈린다.
-    // 위치와 글은 같은 번호에서 나와야 한다
-    const i = want?.[0] ?? t.cursor
-    await save($, {
-      ...all,
-      current: t.id,
-      byTopic: { ...all.byTopic, [t.id]: touch({ ...t, cursor: i }) },
+  for (const command of ['recall', 'trail-recall']) {
+    on('command.run', { command }, ($, e) => runRecall($, e.args ?? '')).catch(($, e, next) => {
+      if (next.called) return next(e)
+      return { text: `다시 보기 실패 — ${String(next.error?.message ?? next.error)}` }
     })
-    return { text: recallText(t, i) }
-  }).catch(($, e, next) => {
-    if (next.called) return next(e)
-    return { text: `다시 보기 실패 — ${String(next.error?.message ?? next.error)}` }
-  })
+  }
 
   on('tool.call', { tool: 'mcp__learn-trail__trail' }, async ($, e) => {
     // 도구 인자는 e 안에 그대로 실린다 (tool · tool_use_id 같은 예약 키와 나란히).
@@ -850,7 +874,7 @@ export const register: Register = on => {
           const title = input.title ?? ''
           const items = input.items ?? []
           const no = all.nextNo
-          line = `목차 ${items.length}개 — ${title} (/recall ${no}.1)`
+          line = `목차 ${items.length}개 — ${title} (${recallCommand} ${no}.1)`
           await save($, {
             ...put(startTrail(title, String(no), items)),
             // 지운 번호는 다시 쓰지 않는다. 같은 번호가 다른 주제를 가리키면 헷갈린다
@@ -897,7 +921,7 @@ export const register: Register = on => {
             line = '본문을 붙일 항목이 없다'
             break
           }
-          line = `본문 저장 (/recall ${cur.id}.${i + 1})`
+          line = `본문 저장 (${recallCommand} ${cur.id}.${i + 1})`
           await save($, put({ ...cur, notes: { ...cur.notes, [String(i)]: input.text ?? '' } }))
           break
         }
@@ -916,7 +940,7 @@ export const register: Register = on => {
             break
           }
           const at = Math.max(0, cur.cursor)
-          line = `곁가지 열림 — ${label} (/recall ${id})`
+          line = `곁가지 열림 — ${label} (${recallCommand} ${id})`
           await save($, put({ ...startTrail(label, id, items), parent: { id: cur.id, at } }))
           break
         }
@@ -927,7 +951,7 @@ export const register: Register = on => {
             break
           }
           // 곁가지는 지우지 않는다. 지금 자리만 부모로 돌린다 — 나중에 /recall 로 다시 본다
-          line = `곁가지 닫음 — ${cur.title} (/recall ${cur.id})`
+          line = `곁가지 닫음 — ${cur.title} (${recallCommand} ${cur.id})`
           await save($, put(up))
           await update($, armed, () => false)
           break
@@ -1005,7 +1029,7 @@ export const register: Register = on => {
      * 칸이 안 받으면(대화상자가 떠 있거나 입력칸이 없는 세션) 칠 말을 알려 준다
      */
     const ask = async (no: string) => {
-      const text = `/recall ${no}`
+      const text = `${recallCommand} ${no}`
       const r = await $.prompt.fill({ text }).catch(() => ({ isFilled: false }))
       if (!r.isFilled) void $.ui.notify(`${text} 를 치면 그 설명을 다시 봅니다`).catch(() => {})
     }
@@ -1162,9 +1186,9 @@ export const register: Register = on => {
           <Text dimColor>{all.on ? '쌓는 중' : '멈춤'}</Text>
           {[
             all.on ? ['/trail off', '그만 쌓기'] : ['/trail', '다시 쌓기'],
-            ['/recall 1.2', '설명 하나 받기'],
-            ['/recall 1', '주제 전체 받기'],
-            ['/recall 1.1,3  1.2-4', '여러 항목 · 범위'],
+            [`${recallCommand} 1.2`, '설명 하나 받기'],
+            [`${recallCommand} 1`, '주제 전체 받기'],
+            [`${recallCommand} 1.1,3  1.2-4`, '여러 항목 · 범위'],
             ['/trail drop 1', '주제 지우기'],
             ['/trail close', '패널 닫기'],
             [focusKey, '패널로 들어오기'],

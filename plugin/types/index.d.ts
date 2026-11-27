@@ -33,6 +33,8 @@ export type Trail = {
    * 목차·본문 저장·/recall 이 고칠 것 없이 그대로 돈다.
    */
   parent?: { id: string; at: number }
+  sessionId?: string
+  createdAt?: number
   /** 마지막으로 손댄 때 (epoch ms). 오래된 주제를 골라내는 기준 */
   touchedAt: number
 }
@@ -72,6 +74,6 @@ export type Trails = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'learn-trail': { trails: Trails; armed: boolean }
+    'learn-trail': { trails: Trails; armed: boolean; expandedSessions: (string | null)[] }
   }
 }

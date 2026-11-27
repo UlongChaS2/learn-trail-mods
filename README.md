@@ -12,21 +12,21 @@
 Long explanations branch like a tree, but a conversation is a single line. Follow one branch and
 **you lose your way back.**
 
-learn-trail shows the outline of what Claude is explaining and **where you are in it** in a side
-pane, and **saves each section verbatim**. Type `/recall 1.3` days later and you get the exact
+learn-trail shows the outline of what Claude is explaining and **where you are in it** in the
+**Learning Trail** pane, and **saves each section verbatim**. Type `/recall 1.3` days later and you get the exact
 explanation back — not a summary. It survives across sessions.
 
 ```
+Learning Trail
+Current session
 ▾ 1. Hikari connection pool  ✕
   ✓ 1.1 Why a connection pool  ●
   ✓ 1.2 What Hikari actually does  ●
   ▸ 1.3 Why a clean boot doesn't mean the DB is reachable  ●  ← now
     1.4 So how do you check
 
-Topics untouched for 7+ days — delete?
-  ✕ 2. Wiring up Vertica (9 days ago)  keep
-
-▸ 3. Jasypt keys  ✕
+▸ Previous session · Oct 13, 14:20 (1)
+▸ Earlier records (1)
 
 ────────────────────────────────
 recording
@@ -34,13 +34,17 @@ recording
 /recall 1.2            replay a section
 /recall 1              replay a whole topic
 /recall 1.1,3  1.2-4   pick sections · ranges
-/trail drop 1          delete a topic
+/drop 1                delete a topic
 /trail close           close the pane
 ctrl+x, tab            focus the pane
 Enter                  fold · switch topic · replay section
+/drop all              delete all records
+
+Topics untouched for 7+ days — delete?
+  ✕ 2. Wiring up Vertica (9 days ago)  keep
 ```
 
-<sub>Illustration translated for this README. The pane, commands' messages and the
+<sub>Illustration translated for this README. The pane body, commands' messages and the
 instructions given to Claude are currently in **Korean**.</sub>
 
 ## Features
@@ -98,11 +102,22 @@ answer on those headings and saves one note per section.
 | `/recall 1.1,3` · `/recall 1.2-4` | A list · a range (mix them: `1.1,3-5`) |
 | `/recall 2a` · `/recall 2a.3` | Side question `a` of topic 2 (whole · section 3) |
 | `/recall hikari` · `/recall hikari 2` | By title prefix when you forget the number (whole topic · one section) |
-| `/trail drop 1` · `/trail drop 2a` | Delete a topic or side question (no number = current); its own side questions go with it |
-| `/trail drop all` | Delete everything |
+| `/drop` | Delete the current topic and its descendants. |
+| `/drop 1` · `/drop 2a` | Delete a topic or side question and its descendants. |
+| `/drop hikari` | Delete a topic by title. Use its number if the title matches more than one topic. |
+| `/drop all` | Delete all records. |
+
+`/drop` accepts whole topics. Use the topic number for titles that look like section addresses, lists, or ranges.
+If another plugin uses `/drop`, use `/trail drop` with the same arguments.
 
 **Type the number the pane shows.** See `1.3`, type `/recall 1.3`. Deleted topic numbers are
 never reused (deleting everything starts again from 1).
+
+Learning Trail lists the current session first. Earlier sessions start collapsed, and records
+without session information appear under **Earlier records**. Use `/recall` to replay a topic
+from any session. Topics untouched for more than seven days appear in the cleanup section at
+the bottom. The **Delete all records** button fills the prompt with `/drop all`. Press
+Enter in the prompt to run it.
 
 ### Side questions
 

@@ -4,6 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Trail, Trails } from '../types'
 
 const PANE = 'learn-trail'
+const PANE_TITLE = 'Learning Trail'
 
 /** 패널 안내 상자의 왼쪽(명령) 칸 폭. 가장 긴 "/recall 1.1,3  1.2-4" 가 20칸이다 */
 const HELP_HOW = 22
@@ -14,6 +15,7 @@ const HELP_HOW = 22
  * (2026-11-03). 그때는 /trail-recall 로 물러나고 안내 문구도 이 이름을 쓴다.
  */
 let recallCommand = '/recall'
+let dropCommand = '/drop'
 
 /** 패널로 들어오는 엔진 동작. 기본 키는 ctrl+x tab 이다 */
 const FOCUS_ACTION = 'abovePrompt:focus'
@@ -66,6 +68,7 @@ const slugOf = (title: string): string => {
 }
 
 const trails = atom({ plugin: 'learn-trail', key: 'trails' } as const, EMPTY)
+const expandedSessions = atom({ plugin: 'learn-trail', key: 'expandedSessions' } as const, [] as (string | null)[])
 
 /**
  * 이번 턴에 모델이 trail 로 목차를 깔거나 항목을 옮겼는가 — 그래야 답을 본문으로 담는다.
@@ -211,13 +214,23 @@ export const without = (all: Trails, key: string): Trails => {
   for (const k of gone) delete rest[k]
   const empty = Object.keys(rest).length === 0
 
-  // 지운 것이 지금 보던 곁가지면 부모로 돌아간다. 엉뚱한 첫 주제로 튀면 길을 잃는다
-  const parentId = all.byTopic[key]?.parent?.id
-  const back = parentId !== undefined && rest[parentId] ? parentId : (Object.keys(rest)[0] ?? '')
+  let current = all.current
+  if (gone.has(current)) {
+    const removed = all.byTopic[key]
+    const parentId = removed?.parent?.id
+    const sessionId = removed?.sessionId
+    if (parentId !== undefined && rest[parentId]) {
+      current = parentId
+    } else if (parentId === undefined && sessionId !== undefined) {
+      current = Object.values(rest).find(t => !t.parent && t.sessionId === sessionId)?.id ?? ''
+    } else {
+      current = ''
+    }
+  }
   return {
     ...all,
     byTopic: rest,
-    current: gone.has(all.current) ? back : all.current,
+    current,
     nextNo: empty ? 1 : all.nextNo,
     collapsed: all.collapsed.filter(k => !gone.has(k)),
     kept: all.kept.filter(k => !gone.has(k)),
@@ -287,17 +300,21 @@ const currentOf = (all: Trails): Trail | undefined => all.byTopic[all.current]
  * @returns 0부터 센 번호를 오름차순·중복 없이. 읽을 수 없는 조각이 있으면 undefined —
  *          읽히는 것만 골라 보여 주면 빠진 줄 모르고 그게 전부인 줄 안다
  */
-export const parsePicks = (spec: string): number[] | undefined => {
+export const parsePicks = (spec: string, maxRange = 1_000): number[] | undefined => {
   const picks = new Set<number>()
   for (const part of spec.split(',')) {
     const one = part.match(/^(\d+)$/)
     const range = part.match(/^(\d+)-(\d+)$/)
     if (one) {
-      picks.add(Number.parseInt(one[1] ?? '', 10) - 1)
+      const index = Number(one[1])
+      if (!Number.isSafeInteger(index)) return undefined
+      picks.add(index - 1)
     } else if (range) {
-      const from = Number.parseInt(range[1] ?? '', 10)
-      const to = Number.parseInt(range[2] ?? '', 10)
-      if (from > to) return undefined
+      const from = Number(range[1])
+      const to = Number(range[2])
+      if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from > to || to - from >= maxRange) {
+        return undefined
+      }
       for (let n = from; n <= to; n++) picks.add(n - 1)
     } else {
       return undefined
@@ -307,6 +324,10 @@ export const parsePicks = (spec: string): number[] | undefined => {
 }
 
 type RecallArgs = { topic?: string; name?: string; picks?: number[]; bad?: string }
+
+const normalizeTitle = (title: string): string => title.trim().toLowerCase().replace(/\s+/g, ' ')
+const TOPIC_ID = /^\d+[a-z]*$/
+const ITEM_PICK = /^[\d,-]+$/
 
 /**
  * `/recall` 뒤에 적은 것을 읽는다.
@@ -320,39 +341,33 @@ type RecallArgs = { topic?: string; name?: string; picks?: number[]; bad?: strin
  * 주제.항목으로 찍히니 `/recall 3` 이 3번 주제인지 3번 항목인지 헷갈렸다(2026-10-13).
  * 이름과 함께 오거나 `1,3` 처럼 묶음이면 항목이다 — 그때는 헷갈릴 게 없다.
  */
-export const parseArgs = (args: string): RecallArgs => {
-  const out: RecallArgs = {}
-  let bare: string | undefined
-  let spec: string | undefined
-  for (const w of args.trim().split(/\s+/).filter(Boolean)) {
-    const dotted = w.toLowerCase().match(/^(\d+[a-z]*)\.(.*)$/)
-    if (dotted) {
-      out.topic = dotted[1] ?? ''
-      if (dotted[2]) spec = dotted[2]
-      continue
-    }
-    // 곁가지 이름(2a)은 숫자로 시작해도 항목 번호일 수 없다 — 바로 주제다
-    if (/^\d+[a-z]+$/i.test(w)) {
-      out.topic = w.toLowerCase()
-      continue
-    }
-    if (/^\d+$/.test(w)) {
-      bare = w
-      continue
-    }
-    if (/^[\d,-]+$/.test(w)) {
-      spec = w
-      continue
-    }
-    out.name = w.toLowerCase()
-  }
+export const parseArgs = (args: string, maxRange = 1_000): RecallArgs => {
+  const text = normalizeTitle(args)
+  if (!text) return {}
 
-  if (bare !== undefined) {
-    if (out.topic !== undefined || out.name !== undefined) spec = bare
-    else out.topic = bare
+  if (TOPIC_ID.test(text)) return { topic: text }
+
+  const out: RecallArgs = {}
+  let spec: string | undefined
+  const dotted = text.match(/^(\d+[a-z]*)\.([\d,. -]*|\S*)$/)
+  if (dotted) {
+    out.topic = dotted[1]
+    if (dotted[2]?.trim()) spec = dotted[2].trim()
+  } else if (ITEM_PICK.test(text)) {
+    spec = text
+  } else {
+    const suffix = text.match(/^(.+) ([\d,-]+)$/)
+    const [, leadingPicks, trailingTarget] = text.match(/^([\d,-]+) (.+)$/) ?? []
+    const picksFirst = leadingPicks && trailingTarget &&
+      (!suffix || (!TOPIC_ID.test(leadingPicks) && TOPIC_ID.test(trailingTarget)))
+    const target = (picksFirst ? trailingTarget : suffix?.[1]) ?? text
+    spec = picksFirst ? leadingPicks : suffix?.[2]
+    if (ITEM_PICK.test(target) && (!TOPIC_ID.test(target) || /^\d+$/.test(spec ?? ''))) return { bad: text }
+    if (TOPIC_ID.test(target)) out.topic = target
+    else out.name = target
   }
   if (spec !== undefined) {
-    const picks = parsePicks(spec)
+    const picks = parsePicks(spec, maxRange)
     if (picks) out.picks = picks
     else out.bad = spec
   }
@@ -398,7 +413,7 @@ const recallManyText = (t: Trail, picks: number[]): string => {
 }
 
 /** 목차를 새로 깔면 그 주제의 진행 상태는 초기화된다 — 반쯤 남은 표시가 섞이면 더 헷갈린다 */
-const startTrail = (title: string, id: string, items: string[]): Trail => ({
+const startTrail = (title: string, id: string, items: string[], sessionId: string, now = Date.now()): Trail => ({
   title,
   id,
   slug: slugOf(title),
@@ -406,7 +421,9 @@ const startTrail = (title: string, id: string, items: string[]): Trail => ({
   cursor: items.length > 0 ? 0 : -1,
   done: [],
   notes: {},
-  touchedAt: Date.now(),
+  sessionId,
+  createdAt: now,
+  touchedAt: now,
 })
 
 /** 지금 항목을 끝낸 것으로 치고 다음으로 */
@@ -426,9 +443,11 @@ const advance = (t: Trail): Trail => {
  */
 export const staleOf = (all: Trails, now: number = Date.now()): Trail[] => {
   const line = now - STALE_DAYS * DAY
+  const current = currentOf(all)
+  const root = current && rootOf(all, current)
   return Object.values(all.byTopic).filter(
     // 곁가지는 묻지 않는다. 지우면 그 주제와 함께 지워진다
-    t => !t.parent && t.touchedAt < line && !all.kept.includes(t.id) && t.id !== all.current,
+    t => !t.parent && t.touchedAt < line && !all.kept.includes(t.id) && t.id !== root?.id,
   )
 }
 
@@ -507,59 +526,81 @@ const agoOf = (at: number): string => {
   return days >= 1 ? `${days}일 전` : '오늘'
 }
 
-/**
- * `/recall` (거부됐으면 `/trail-recall`) 의 본체. 두 이름이 같은 함수를 쓰도록 최상단에 둔다.
- * 로더가 `$` 를 넘기는 함수는 파일 최상단 선언만 허용한다.
- *
- * `/recall hikari 1` · `/recall 1` · `/recall hikari` · `/recall` 을 모두 받는다.
- * 어느 쪽이 주제고 어느 쪽이 번호인지는 생김새로 가른다 — 순서를 외우게 하지 않는다.
- */
-const runRecall = async ($: EngineInterface, args: string) => {
-  const all = await read($, trails)
-  const { topic, name, picks, bad } = parseArgs(args)
+type SessionGroup = { id: string | null; startedAt: number; topics: Trail[] }
 
-  if (bad !== undefined) {
-    return { text: `"${bad}" 은 읽을 수 없습니다. 예: ${recallCommand} 1 · 1.2 · 1.1,3 · 1.2-4` }
+const sessionGroups = (roots: Trail[]): SessionGroup[] => {
+  const groups = new Map<string | null, SessionGroup>()
+  for (const t of roots.sort(byId)) {
+    const id = t.sessionId ?? null
+    const at = id === null ? -Infinity : (t.createdAt ?? t.touchedAt)
+    const group = groups.get(id)
+    if (group) {
+      group.topics.push(t)
+      group.startedAt = Math.min(group.startedAt, at)
+    } else {
+      groups.set(id, { id, startedAt: at, topics: [t] })
+    }
   }
+  return [...groups.values()].sort((a, b) => b.startedAt - a.startedAt)
+}
 
-  const list = () =>
-    Object.values(all.byTopic)
-      .sort(byId)
-      .map(x => `${x.id}. ${x.title}${fromOf(x)}  (${recallCommand} ${x.id}.1)`)
+const sessionDate = new Intl.DateTimeFormat('ko-KR', {
+  month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+})
+
+const matchingTitles = (topics: Trail[], query: string): Trail[] =>
+  topics.filter(t => t.slug.startsWith(query) || normalizeTitle(t.title).includes(query))
+
+const trailList = (topics: Trail[], command: string, suffix = ''): string => {
+  if (!topics.length) return ''
+  const rows = [...topics].sort(byId).map(t =>
+    `${t.id}. ${t.title}${fromOf(t)}  (${command} ${t.id}${suffix})`,
+  )
+  return `\n\n들고 있는 것:\n- ${rows.join('\n- ')}`
+}
+
+const selectRecall = (all: Trails, args: string) => {
+  const topics = Object.values(all.byTopic)
+  const maxRange = Math.max(1_000, ...topics.map(t => t.items.length))
+  const { topic, name, picks, bad } = parseArgs(args, maxRange)
+  if (bad !== undefined) {
+    return { error: `"${bad}" 은 읽을 수 없습니다. 예: ${recallCommand} 1 · 1.2 · 1.1,3 · 1.2-4` }
+  }
 
   let t = currentOf(all)
   if (topic !== undefined) {
     t = all.byTopic[topic]
     if (!t) {
-      return { text: `${topic}${/^\d+$/.test(topic) ? '번' : ''} 주제가 없습니다.\n\n들고 있는 것:\n- ${list().join('\n- ')}` }
+      return { error: `${topic}${/^\d+$/.test(topic) ? '번' : ''} 주제가 없습니다.${trailList(topics, recallCommand, '.1')}` }
     }
   } else if (name !== undefined) {
-    // 번호가 기억 안 날 때를 위해 이름도 받는다. 앞부분만 쳐도 찾는다
-    const hit = Object.values(all.byTopic).find(
-      x => x.slug.startsWith(name) || x.title.toLowerCase().includes(name),
-    )
-    if (!hit) {
-      return {
-        text:
-          list().length > 0
-            ? `"${name}" 에 맞는 주제가 없습니다.\n\n들고 있는 것:\n- ${list().join('\n- ')}`
-            : '아직 들고 있는 주제가 없습니다.',
-      }
+    t = matchingTitles(topics, name)[0]
+    if (!t && topics.length > 0) {
+      return { error: `"${name}" 에 맞는 주제가 없습니다.${trailList(topics, recallCommand, '.1')}` }
     }
-    t = hit
   }
 
-  if (!t) return { text: '아직 들고 있는 주제가 없습니다.' }
+  if (!t) return { error: '아직 들고 있는 주제가 없습니다.' }
 
   // 없는 번호면 그렇다고 말한다. 조용히 다른 항목을 보여 주면 그게 맞는 글인 줄 안다
   const missing = (picks ?? []).filter(i => i < 0 || i >= t.items.length)
   if (missing.length > 0) {
     const nos = missing.map(i => i + 1).join(', ')
-    return { text: `${t.id}번 주제에는 ${nos}번 항목이 없습니다 (1 ~ ${t.items.length}).` }
+    return { error: `${t.id}번 주제에는 ${nos}번 항목이 없습니다 (1 ~ ${t.items.length}).` }
   }
+  return { trail: t, picks, named: topic !== undefined || name !== undefined }
+}
+
+const runRecall = async ($: EngineInterface, args: string) => {
+  const all = await read($, trails)
+  const selected = selectRecall(all, args)
+  if (!selected.trail) return { text: selected.error }
+
+  const { trail: t, picks, named } = selected
+  const sessionId = rootOf(all, t).sessionId ?? null
+  await update($, expandedSessions, ids => ids.includes(sessionId) ? ids : [...ids, sessionId])
 
   // 주제만 짚으면 전체다. 아무것도 안 짚으면 지금 자리 하나
-  const named = topic !== undefined || name !== undefined
   const want = picks ?? (named ? t.items.map((_, i) => i) : undefined)
 
   // 여럿을 보여 줄 때는 패널의 "지금" 을 그대로 둔다. 어느 하나로 옮길 근거가 없다
@@ -577,6 +618,51 @@ const runRecall = async ($: EngineInterface, args: string) => {
     byTopic: { ...all.byTopic, [t.id]: touch({ ...t, cursor: i }) },
   })
   return { text: recallText(t, i) }
+}
+
+const selectDropTopic = (all: Trails, query: string, command: string): { trail: Trail } | { error: string } => {
+  const topics = Object.values(all.byTopic)
+  if (!query) {
+    const trail = currentOf(all)
+    return trail ? { trail } : { error: '아직 들고 있는 주제가 없습니다.' }
+  }
+  if (TOPIC_ID.test(query)) {
+    const trail = all.byTopic[query]
+    return trail ? { trail } : { error: `${query} 주제가 없습니다.${trailList(topics, command)}` }
+  }
+
+  const itemError = `주제 단위로만 지울 수 있습니다. ${command} 1 또는 ${command} 2a처럼 주제 번호를 입력하세요.`
+  const words = query.split(' ')
+  const edgePicks = [words[0] ?? '', words.at(-1) ?? ''].filter(word => ITEM_PICK.test(word))
+  if (/^\d+[a-z]*\./.test(query) || edgePicks.some(pick => /[,-]/.test(pick))) return { error: itemError }
+
+  const exact = topics.filter(t => normalizeTitle(t.title) === query)
+  if (!exact.length && edgePicks.length > 0) return { error: itemError }
+
+  const matches = exact.length ? exact : matchingTitles(topics, query)
+  if (matches.length > 1) {
+    return { error: `"${query}" 에 맞는 주제가 여러 개입니다. 번호를 입력하세요.${trailList(matches, command)}` }
+  }
+  const [trail] = matches
+  return trail ? { trail } : { error: `"${query}" 에 맞는 주제가 없습니다.${trailList(topics, command)}` }
+}
+
+const runDrop = async ($: EngineInterface, args: string, command: string) => {
+  const query = normalizeTitle(args)
+  if (query.startsWith('all ')) return { text: `전체를 지우려면 ${command} all만 입력하세요.` }
+
+  const all = await read($, trails)
+  if (query === 'all') {
+    await save($, { ...EMPTY, on: all.on })
+    await update($, expandedSessions, () => [])
+    return { text: '주제를 전부 지웠습니다. 다음 주제는 1번부터 시작합니다.' }
+  }
+
+  const selected = selectDropTopic(all, query, command)
+  if ('error' in selected) return { text: selected.error }
+  const { trail } = selected
+  await save($, without(all, trail.id))
+  return { text: `${trail.id}. ${trail.title} — 지웠습니다.` }
 }
 
 export const register: Register = on => {
@@ -621,7 +707,7 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'trail',
-      description: '학습 경로 패널을 열고 쌓기 시작한다 (close 닫기 · off 그만 · drop N 지움)',
+      description: `${PANE_TITLE} 패널을 열고 쌓기 시작한다 (close 닫기 · off 그만 · drop 지움)`,
     })
     try {
       await $.command.register({
@@ -637,11 +723,24 @@ export const register: Register = on => {
       })
     }
 
+    try {
+      await $.command.register({
+        name: 'drop',
+        description: '주제나 전체 기록을 지운다 (/drop 1 · /drop all)',
+      })
+      dropCommand = '/drop'
+    } catch {
+      dropCommand = '/trail drop'
+    }
+
     // 지난 세션에서 쌓아 둔 것을 되살린다
     try {
       const saved = (await $.store.get(STORE_KEY)) as Trails | undefined
       if (saved && saved.byTopic) {
-        await update($, trails, () => migrate({ ...EMPTY, ...saved }))
+        const restored = migrate({ ...EMPTY, ...saved })
+        const current = currentOf(restored)
+        const resume = current && rootOf(restored, current).sessionId === await $.session.id()
+        await update($, trails, () => ({ ...restored, current: resume ? restored.current : '' }))
       }
     } catch {
       // 복원 실패는 조용히 넘긴다 — 빈 목차로 시작하면 된다
@@ -689,12 +788,6 @@ export const register: Register = on => {
     }
   })
 
-  /**
-   * 패널 열기, 그리고 지우기.
-   *
-   * `/trail` · `/trail drop 2` · `/trail drop all`. 지우는 길이 패널의 ✕ 뿐이면
-   * 묵지 않은 주제는 버릴 수가 없다 — 끝난 주제는 바로 버리고 싶을 때가 있다.
-   */
   /**
    * 모델이 쓴 답을 지금 항목의 본문으로 담는다.
    *
@@ -772,50 +865,32 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'trail' }, async ($, e) => {
-    const words = (e.args ?? '').trim().split(/\s+/).filter(Boolean)
+    const [, action, args = ''] = (e.args ?? '').trim().match(/^(\S+)(?:\s+([\s\S]+))?$/) ?? []
 
     // 패널만 닫는다. 쌓기는 그대로 — 화면이 좁을 때 치워 두는 것이지 그만두는 게 아니다.
     // 그만두려면 /trail off. 둘을 한 명령에 묶으면 "잠깐 치우기" 를 할 수 없다
-    if (words[0] === 'close') {
+    if (action === 'close') {
       await $.ui.close({ id: PANE }).catch(() => {})
       return { text: '패널을 닫았습니다. 기록은 계속됩니다 (다시 열기 /trail · 그만 쌓기 /trail off).' }
     }
 
-    if (words[0] === 'off') {
+    if (action === 'off') {
       const all = await read($, trails)
       await save($, { ...all, on: false })
       return { text: `그만 쌓습니다. 쌓인 것은 ${recallCommand} 로 그대로 볼 수 있습니다.` }
     }
 
-    if (words[0] === 'drop') {
-      const all = await read($, trails)
-      const what = words[1] ?? ''
-
-      if (what === 'all') {
-        // 다 지웠으면 1번부터 다시 센다. 번호를 안 되살리는 건 남은 주제와 겹치지 않게
-        // 하려는 것인데, 남은 게 없으면 겹칠 것도 없다. 켜짐 상태는 그대로 둔다
-        await save($, { ...EMPTY, on: all.on })
-        return { text: '주제를 전부 지웠습니다. 다음 주제는 1번부터 시작합니다.' }
-      }
-
-      // 번호를 안 주면 지금 주제. 가장 흔한 경우다
-      const key = what === '' ? all.current : what
-      const gone = all.byTopic[key]
-      if (!gone) return { text: `${key || '지금'} 주제가 없습니다.` }
-
-      await save($, without(all, key))
-      return { text: `${gone.id}. ${gone.title} — 지웠습니다.` }
-    }
+    if (action === 'drop') return runDrop($, args, '/trail drop')
 
     // 패널을 여는 것 자체가 "쓰겠다" 는 뜻이다. 따로 켜게 하면, 열어 놓고 안 쌓이는
     // 걸 보며 왜 비었는지 묻게 된다 — 실제로 그랬다. 끄는 것만 따로 둔다
     const all = await read($, trails)
     if (!all.on) await save($, { ...all, on: true })
-    await $.ui.open({ id: PANE, title: '학습 경로' }).catch(() => {})
+    await $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => {})
     return {
       text: all.on
-        ? '학습 경로 패널을 열었습니다.'
-        : '학습 경로를 열었습니다. 설명이 여러 갈래로 나뉘면 목차가 쌓입니다 (그만하려면 /trail off).',
+        ? `${PANE_TITLE} 패널을 열었습니다.`
+        : `${PANE_TITLE} 패널을 열었습니다. 설명이 여러 갈래로 나뉘면 목차가 쌓입니다 (그만하려면 /trail off).`,
     }
   }).catch(($, e, next) => {
     if (next.called) return next(e)
@@ -839,6 +914,14 @@ export const register: Register = on => {
     })
   }
 
+  on('command.run', { command: 'drop' }, ($, e, next) => {
+    if (dropCommand !== '/drop') return next(e)
+    return runDrop($, e.args ?? '', dropCommand)
+  }).catch(($, e, next) => {
+    if (next.called) return next(e)
+    return { text: `주제 삭제 실패 — ${String(next.error?.message ?? next.error)}` }
+  })
+
   on('tool.call', { tool: 'mcp__learn-trail__trail' }, async ($, e) => {
     // 도구 인자는 e 안에 그대로 실린다 (tool · tool_use_id 같은 예약 키와 나란히).
     // e.input 이 아니다 — 그걸로 읽으면 action 이 undefined 로 온다
@@ -858,7 +941,8 @@ export const register: Register = on => {
     try {
       const all = await read($, trails)
       if (!all.on) {
-        return { result: '학습 경로가 꺼져 있다 (/trail 로 켠다)', text: '학습 경로가 꺼져 있다 (/trail 로 켠다)' }
+        const text = `${PANE_TITLE} 기록이 꺼져 있다 (/trail 로 켠다)`
+        return { result: text, text }
       }
       const cur = currentOf(all)
 
@@ -876,7 +960,7 @@ export const register: Register = on => {
           const no = all.nextNo
           line = `목차 ${items.length}개 — ${title} (${recallCommand} ${no}.1)`
           await save($, {
-            ...put(startTrail(title, String(no), items)),
+            ...put(startTrail(title, String(no), items, await $.session.id())),
             // 지운 번호는 다시 쓰지 않는다. 같은 번호가 다른 주제를 가리키면 헷갈린다
             nextNo: no + 1,
           })
@@ -941,7 +1025,7 @@ export const register: Register = on => {
           }
           const at = Math.max(0, cur.cursor)
           line = `곁가지 열림 — ${label} (${recallCommand} ${id})`
-          await save($, put({ ...startTrail(label, id, items), parent: { id: cur.id, at } }))
+          await save($, put({ ...startTrail(label, id, items, await $.session.id()), parent: { id: cur.id, at } }))
           break
         }
         case 'pop': {
@@ -979,7 +1063,7 @@ export const register: Register = on => {
     // 목차를 깔면 패널이 없을 때 열어 준다. 설명이 시작되는 순간이 열기 좋은 때다.
     // 여는 데 실패해도 삼킨다 — 패널이 안 떠도 설명은 계속돼야 한다
     if (input.action === 'set') {
-      void $.ui.open({ id: PANE, title: '학습 경로' }).catch(() => {})
+      void $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => {})
     }
 
     // result 는 문자열·배열만 받는다. 객체를 돌려주면 호출이 통째로 거부된다
@@ -997,14 +1081,16 @@ export const register: Register = on => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const all = await read($, trails)
     const cur = currentOf(all)
-    const stale = staleOf(all)
-    // 곁가지는 지금 주제 안에 한 줄씩 그려진다. 아래 목록에는 맨 위 주제만 둔다
     const top = cur ? rootOf(all, cur) : undefined
-    const others = Object.values(all.byTopic)
-      .filter(t => !t.parent && t.id !== top?.id)
-      .sort(byId)
+    const sessionId = await $.session.id()
+    const expanded = await read($, expandedSessions)
+    const showingCurrent = top && (top.sessionId === sessionId || expanded.includes(top.sessionId ?? null))
+    const stale = staleOf(showingCurrent ? all : { ...all, current: '' })
+    const staleIds = new Set(stale.map(t => t.id))
+    const groups = sessionGroups(Object.values(all.byTopic).filter(t => !t.parent && !staleIds.has(t.id)))
+    const currentTopics = groups.find(group => group.id === sessionId)?.topics ?? []
 
-    if (!cur && others.length === 0) {
+    if (groups.length === 0 && stale.length === 0) {
       return (
         <Box flexDirection="column">
           <Text dimColor>아직 목차가 없습니다.</Text>
@@ -1025,13 +1111,11 @@ export const register: Register = on => {
     const folded = cur ? all.collapsed.includes(cur.id) : false
 
     /**
-     * 입력칸에 `/recall 번호` 를 채운다. 보내는 건 사람이 Enter 로 한다.
      * 칸이 안 받으면(대화상자가 떠 있거나 입력칸이 없는 세션) 칠 말을 알려 준다
      */
-    const ask = async (no: string) => {
-      const text = `${recallCommand} ${no}`
+    const fill = async (text: string) => {
       const r = await $.prompt.fill({ text }).catch(() => ({ isFilled: false }))
-      if (!r.isFilled) void $.ui.notify(`${text} 를 치면 그 설명을 다시 봅니다`).catch(() => {})
+      if (!r.isFilled) void $.ui.notify(`${text} 를 입력하세요`).catch(() => {})
     }
 
     /** 그 주제로 옮긴다 */
@@ -1052,74 +1136,133 @@ export const register: Register = on => {
 
     const up = cur?.parent ? all.byTopic[cur.parent.id] : undefined
 
+    const currentOutline = cur && (
+      <Box key={`outline-${cur.id}`} flexDirection="column">
+        <Box>
+          <Button
+            key={`fold-${cur.id}`}
+            plain
+            autoFocus
+            label={`${folded ? '▸' : '▾'} ${crumbOf(all, cur)}`}
+            onPress={() => fold(cur.id)}
+          />
+          <Button
+            key={`x-${cur.id}`}
+            plain
+            dimColor
+            label="  ✕"
+            onPress={() => drop(cur.id)}
+          />
+        </Box>
+
+        {!folded &&
+          cur.items.flatMap((item, i) => {
+            const isNow = i === cur.cursor
+            const isDone = cur.done.includes(i)
+            const mark = isDone ? '✓' : isNow ? '▸' : ' '
+            const dot = cur.notes?.[String(i)] ? '  ●' : ''
+            const row = (
+              <Button
+                key={`i-${cur.id}-${i}`}
+                plain
+                dimColor={isDone && !isNow}
+                label={`${mark} ${cur.id}.${i + 1} ${item}${dot}${isNow ? '  ← 지금' : ''}`}
+                onPress={() => fill(`${recallCommand} ${cur.id}.${i + 1}`)}
+              />
+            )
+            const kids = childrenAt(all, cur.id, i).map(c => (
+              <Button
+                key={`b-${c.id}`}
+                plain
+                dimColor
+                label={`    ↳ ${c.id}. ${c.title}${c.items.length > 1 ? ` (${c.items.length})` : ''}`}
+                onPress={() => go(c.id)}
+              />
+            ))
+            return [row, ...kids]
+          })}
+
+        {!folded && up && (
+          <Button
+            key={`up-${up.id}`}
+            plain
+            dimColor
+            label={`↰ ${up.id}.${(cur.parent?.at ?? 0) + 1} 로 돌아가기`}
+            onPress={() => go(up.id)}
+          />
+        )}
+      </Box>
+    )
+
+    const topicRows = (topics: Trail[]) => [
+      topics.some(t => t.id === top?.id) ? currentOutline : null,
+      ...topics.filter(t => t.id !== top?.id).map(t => (
+        <Box key={`row-${t.id}`}>
+          <Button
+            key={`go-${t.id}`}
+            plain
+            dimColor
+            label={`▸ ${t.id}. ${t.title}`}
+            onPress={() => go(t.id)}
+          />
+          <Button key={`gx-${t.id}`} plain dimColor label="  ✕" onPress={() => drop(t.id)} />
+        </Box>
+      )),
+    ]
+
     return (
       <Box flexDirection="column">
-        {cur && (
-          <Box flexDirection="column">
-            {/* 지금 있는 목차 하나만 그린다. 부모와 곁가지를 같이 펼치면 한 단계 들어갈
-                때마다 패널이 길어지고 들여쓰기만큼 글이 잘렸다(2026-10-14). 어디서 왔는지는
-                머리줄 경로가 말한다 — 몇 단계를 들어가도 패널 모양은 같다.
-                항목 줄은 누르면 입력칸에 `/recall 1.3` 을 채운다. Enter 한 번 더로 저장본을 받는다.
-                바로 보내지(prompt.submit) 않는다 — 그건 모델에게 가는 새 턴이라 설명을 다시 쓰고,
-                다시 쓰면 말이 달라진다. 입력칸까지만 가면 /recall 이 저장본을 그대로 꺼낸다
-                (2026-10-16. 그전에는 버튼에서 대화로 가는 길이 없는 줄 알고 글로만 뒀다) */}
-            <Box>
+        <Box flexDirection="column">
+          <Text dimColor>현재 세션</Text>
+          {currentTopics.length > 0 ? topicRows(currentTopics) : <Text dimColor>이 세션에 쌓인 목차가 없습니다.</Text>}
+        </Box>
+
+        {groups.filter(group => group.id !== sessionId).map(({ id, startedAt, topics }) => {
+          const key = id ?? 'legacy'
+          const open = expanded.includes(id)
+          const label = id === null ? '이전 기록' : `이전 세션 · ${sessionDate.format(startedAt)}`
+          return (
+            <Box key={`group-${key}`} flexDirection="column" paddingTop={1}>
               <Button
-                key={`fold-${cur.id}`}
+                key={`session-${key}`}
                 plain
-                autoFocus
-                label={`${folded ? '▸' : '▾'} ${crumbOf(all, cur)}`}
-                onPress={() => fold(cur.id)}
+                label={`${open ? '▾' : '▸'} ${label} (${topics.length})`}
+                onPress={() => update($, expandedSessions, ids =>
+                  ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id],
+                )}
               />
-              <Button
-                key={`x-${cur.id}`}
-                plain
-                dimColor
-                label="  ✕"
-                onPress={() => drop(cur.id)}
-              />
+              {open && topicRows(topics)}
             </Box>
+          )
+        })}
 
-            {!folded &&
-              cur.items.flatMap((item, i) => {
-                const isNow = i === cur.cursor
-                const isDone = cur.done.includes(i)
-                const mark = isDone ? '✓' : isNow ? '▸' : ' '
-                // 점(●)은 "본문이 저장돼 있다" — /recall 로 꺼낼 것이 있다는 표시다
-                const dot = cur.notes?.[String(i)] ? '  ●' : ''
-                const row = (
-                  <Button
-                    key={`i-${cur.id}-${i}`}
-                    plain
-                    dimColor={isDone && !isNow}
-                    label={`${mark} ${cur.id}.${i + 1} ${item}${dot}${isNow ? '  ← 지금' : ''}`}
-                    onPress={() => ask(`${cur.id}.${i + 1}`)}
-                  />
-                )
-                // 여기서 갈라진 곁가지는 제목 한 줄씩만. 펼치지 않는다 — 들어가서 본다
-                const kids = childrenAt(all, cur.id, i).map(c => (
-                  <Button
-                    key={`b-${c.id}`}
-                    plain
-                    dimColor
-                    label={`    ↳ ${c.id}. ${c.title}${c.items.length > 1 ? ` (${c.items.length})` : ''}`}
-                    onPress={() => go(c.id)}
-                  />
-                ))
-                return [row, ...kids]
-              })}
-
-            {!folded && up && (
-              <Button
-                key={`up-${up.id}`}
-                plain
-                dimColor
-                label={`↰ ${up.id}.${(cur.parent?.at ?? 0) + 1} 로 돌아가기`}
-                onPress={() => go(up.id)}
-              />
-            )}
-          </Box>
-        )}
+        <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1} marginTop={1}>
+          <Text dimColor>{all.on ? '쌓는 중' : '멈춤'}</Text>
+          {[
+            all.on ? ['/trail off', '그만 쌓기'] : ['/trail', '다시 쌓기'],
+            [`${recallCommand} 1.2`, '설명 하나 받기'],
+            [`${recallCommand} 1`, '주제 전체 받기'],
+            [`${recallCommand} 1.1,3  1.2-4`, '여러 항목 · 범위'],
+            [`${dropCommand} 1`, '주제 지우기'],
+            ['/trail close', '패널 닫기'],
+            [focusKey, '패널로 들어오기'],
+            ['Enter', '접기 · 바꾸기 · 항목 다시 보기'],
+          ].map(([how, what]) => (
+            <Box key={how} flexDirection="row">
+              <Box width={HELP_HOW} flexShrink={0}>
+                <Text dimColor>{how}</Text>
+              </Box>
+              <Text dimColor>{what}</Text>
+            </Box>
+          ))}
+          <Button
+            key="drop-all"
+            plain
+            dimColor
+            label={`${dropCommand} all · 전체 지우기`}
+            onPress={() => fill(`${dropCommand} all`)}
+          />
+        </Box>
 
         {/* 오래 묵은 주제는 한 번 묻는다. 안 물으면 패널이 길어지기만 한다.
             "두기" 를 고르면 다시 묻지 않는다 — 켤 때마다 같은 걸 물으면 그게 성가시다 */}
@@ -1148,60 +1291,6 @@ export const register: Register = on => {
             ))}
           </Box>
         )}
-
-        {/* 지금 주제와 같은 모양으로 세운다 — 다르게 생기면 "주석" 처럼 읽혀서
-            눌러도 되는 줄인지 모른다. 색만 죽인다. 누르면 그 주제가 열린다 */}
-        {others.length > 0 && (
-          <Box flexDirection="column" paddingTop={1}>
-            {others.map(t => (
-              <Box key={`row-${t.id}`}>
-                <Button
-                  key={`go-${t.id}`}
-                  plain
-                  dimColor
-                  label={`▸ ${t.id}. ${t.title}`}
-                  onPress={() => go(t.id)}
-                />
-                <Button
-                  key={`gx-${t.id}`}
-                  plain
-                  dimColor
-                  label="  ✕"
-                  onPress={() => drop(t.id)}
-                />
-              </Box>
-            ))}
-          </Box>
-        )}
-
-        {/* 쓸 수 있는 말을 상자에 모은다. 목차 줄들과 섞여 흐르면 안내인지 항목인지
-            구분이 안 된다 — 테두리가 그 경계를 긋는다 */}
-        {/* 명령과 설명을 두 칸으로 나눈다. 공백으로 줄을 맞추면 한글·"—"·"·" 의 폭을
-            사람이 세야 하는데, 터미널마다 달라 어긋났다(2026-10-13). 왼쪽 칸 폭을 고정해
-            엔진이 재게 한다.
-            명령(영문)을 왼쪽에 둔다. 설명을 왼쪽에 두니 오른쪽 칸이 "/" 로 시작하는 줄과
-            한글로 시작하는 줄이 섞였고, 칸은 맞아도 글자 모양 탓에 한글 줄이 한 칸 당겨져
-            보였다. 오른쪽 칸을 전부 한글로 시작하게 하면 그런 줄이 없다 */}
-        <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1} marginTop={1}>
-          <Text dimColor>{all.on ? '쌓는 중' : '멈춤'}</Text>
-          {[
-            all.on ? ['/trail off', '그만 쌓기'] : ['/trail', '다시 쌓기'],
-            [`${recallCommand} 1.2`, '설명 하나 받기'],
-            [`${recallCommand} 1`, '주제 전체 받기'],
-            [`${recallCommand} 1.1,3  1.2-4`, '여러 항목 · 범위'],
-            ['/trail drop 1', '주제 지우기'],
-            ['/trail close', '패널 닫기'],
-            [focusKey, '패널로 들어오기'],
-            ['Enter', '주제 접기 · 바꾸기 · 항목 다시 보기'],
-          ].map(([how, what]) => (
-            <Box key={how} flexDirection="row">
-              <Box width={HELP_HOW} flexShrink={0}>
-                <Text dimColor>{how}</Text>
-              </Box>
-              <Text dimColor>{what}</Text>
-            </Box>
-          ))}
-        </Box>
       </Box>
     )
   })

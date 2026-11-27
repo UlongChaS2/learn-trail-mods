@@ -1,4 +1,5 @@
-import { test, expect } from 'claude-code/testing'
+import { test as engineTest, expect, mock } from 'claude-code/testing'
+import type { Engine, TestBody } from 'claude-code/testing'
 
 import {
   captureTarget,
@@ -16,6 +17,11 @@ import {
 } from './register'
 
 const TOOL = 'mcp__learn-trail__trail'
+const CURRENT_SESSION = 'current-session'
+const test = (name: string, body: TestBody) => engineTest(name, ($, on) => {
+  on('session.id', () => ({ value: CURRENT_SESSION }))
+  return body($, on)
+})
 
 /**
  * 명령 하나를 사람이 친 것처럼 돌린다. 엔진은 origin·presentation 을 스스로 채우는데
@@ -41,6 +47,7 @@ test('set 이 목차를 깔고 부를 이름을 만든다', async $ => {
   expect(res.text).toContain('목차 2개')
   // "Hikari 커넥션 풀" → hikari. 번호만 외우게 하면 주제가 여럿일 때 못 찾는다
   expect(res.text).toContain('/recall 1.1')
+  expect((await run($, 'recall', 'hikari 2')).text).toContain('2. 무엇을 하나')
 })
 
 /**
@@ -186,11 +193,11 @@ test('/trail drop 으로 번호를 찍어 지운다', async $ => {
   expect(gone.text).toContain('1번 주제가 없습니다')
 })
 
-test('/trail drop all 로 전부 지운다', async $ => {
+test('/drop all 로 전부 지운다', async $ => {
   await run($, 'trail')
   await $.tool.call({ tool: TOOL, action: 'set', title: 'Gamma 주제', items: ['가'] })
 
-  const res = await run($, 'trail', 'drop all')
+  const res = await run($, 'drop', 'all')
   expect(res.text).toContain('전부 지웠습니다')
 
   const after = await run($, 'recall')
@@ -552,6 +559,7 @@ test('맨 숫자는 주제, 주제.묶음은 항목이다', () => {
   expect(parseArgs('2')).toEqual({ topic: '2' })
   expect(parseArgs('2.')).toEqual({ topic: '2' })
   expect(parseArgs('2.3')).toEqual({ topic: '2', picks: [2] })
+  expect(parseArgs('2. 3')).toEqual({ topic: '2', picks: [2] })
   expect(parseArgs('2.1,3')).toEqual({ topic: '2', picks: [0, 2] })
   expect(parseArgs('2.2-4')).toEqual({ topic: '2', picks: [1, 2, 3] })
   // 이름과 함께 온 숫자는 그 주제의 항목이다
@@ -562,12 +570,211 @@ test('맨 숫자는 주제, 주제.묶음은 항목이다', () => {
 })
 
 /** 본문을 깔아 둔 세 항목짜리 주제. 본문은 note 로 바로 넣는다 — 답을 줍는 문은 흉내 못 낸다 */
-const seeded = async ($: Parameters<Parameters<typeof test>[1]>[0]) => {
+const seeded = async ($: Engine) => {
   await run($, 'trail')
   await $.tool.call({ tool: TOOL, action: 'set', title: 'Multi 주제', items: ['가', '나', '다'] })
   await $.tool.call({ tool: TOOL, action: 'note', index: 1, text: '본문-가' } as never)
   await $.tool.call({ tool: TOOL, action: 'note', index: 3, text: '본문-다' } as never)
 }
+
+const mountTrail = ($: Engine) => $.ui.mount({
+  plugin: 'learn-trail',
+  surface: 'terminal',
+  component: 'Pane',
+  requestId: 'learn-trail',
+  props: {
+    title: 'Learning Trail', isFocused: true, bodyColumns: 80, placement: 'inline',
+    scroll: { offset: 0, bodyRows: 40 }, view: {},
+  },
+})
+
+test('/drop 1은 주제와 그 아래 곁가지를 지운다', async $ => {
+  await seeded($)
+  await $.tool.call({ tool: TOOL, action: 'push', label: '곁가지' })
+  await $.tool.call({ tool: TOOL, action: 'push', label: '하위 곁가지' })
+  await $.tool.call({ tool: TOOL, action: 'set', title: '남길 주제', items: ['하나'] })
+
+  expect((await run($, 'drop', '1')).text).toContain('1. Multi 주제')
+  for (const id of ['1', '1a', '1aa']) {
+    expect((await run($, 'recall', id)).text).toContain('주제가 없습니다')
+  }
+  expect((await run($, 'recall', '2')).text).toContain('남길 주제')
+})
+
+test('/drop 2a는 곁가지와 그 아래 곁가지만 지운다', async $ => {
+  await seeded($)
+  await $.tool.call({ tool: TOOL, action: 'set', title: '둘째 주제', items: ['하나'] })
+  await $.tool.call({ tool: TOOL, action: 'push', label: '곁가지' })
+  await $.tool.call({ tool: TOOL, action: 'push', label: '하위 곁가지' })
+
+  expect((await run($, 'drop', '2a')).text).toContain('2a. 곁가지')
+  expect((await run($, 'recall', '2a')).text).toContain('주제가 없습니다')
+  expect((await run($, 'recall', '2aa')).text).toContain('주제가 없습니다')
+  expect((await run($, 'recall', '2')).text).toContain('둘째 주제')
+})
+
+test('/drop은 숫자로 끝나는 정확한 제목을 먼저 선택한다', async $ => {
+  await run($, 'trail')
+  await $.tool.call({ tool: TOOL, action: 'set', title: 'HTTP', items: ['요청', '응답'] })
+  await $.tool.call({ tool: TOOL, action: 'set', title: 'HTTP 2', items: ['프레임'] })
+  await $.tool.call({ tool: TOOL, action: 'set', title: 'HTTP 2 설정', items: ['연결'] })
+
+  expect((await run($, 'drop', 'http 2')).text).toBe('2. HTTP 2 — 지웠습니다.')
+  expect((await run($, 'recall', '1.2')).text).toContain('2. 응답')
+  expect((await run($, 'recall', '2')).text).toContain('주제가 없습니다')
+  expect((await run($, 'trail', 'drop HTTP 2 설')).text).toBe('3. HTTP 2 설정 — 지웠습니다.')
+})
+
+test('/drop과 /trail drop은 항목·목록·범위 및 전체 삭제 오타를 거부한다', async $ => {
+  await seeded($)
+  await $.tool.call({ tool: TOOL, action: 'set', title: 'Multi 주제 1-2', items: ['하나'] })
+
+  for (const command of ['drop', 'trail']) {
+    const drop = (args: string) => run($, command, command === 'drop' ? args : 'drop ' + args)
+    expect((await drop('Multi')).text).toContain('주제가 여러 개')
+    for (const args of ['1.2', '1.', '1.1 2', '1,3', '1.1,3', '1.2-3', '2a.1', '1,3 2', '2 1,3', 'Multi 주제 2', '2 Multi 주제', 'Multi 주제 1-2']) {
+      expect((await drop(args)).text).toContain('주제 단위로만')
+    }
+    const name = command === 'drop' ? '/drop' : '/trail drop'
+    expect((await drop('all 뒤에 추가 입력')).text).toContain(name + ' all만 입력하세요')
+  }
+
+  const full = await run($, 'recall', '1')
+  expect(full.text).toContain('전체 3개')
+  expect(full.text).toContain('본문-가')
+  expect(full.text).toContain('본문-다')
+  expect((await run($, 'recall', '2')).text).toContain('Multi 주제 1-2')
+})
+
+const mockSessionStart = (on: Parameters<TestBody>[1], unavailableCommand?: string) => {
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('tool.register', () => ({ value: { tool: TOOL } }))
+  on('command.register', (_, e) => {
+    if (e.name === unavailableCommand) throw new Error('Command is already registered')
+    return { value: { command: e.name } }
+  })
+}
+
+test('/drop 이름이 이미 쓰이면 패널에서 /trail drop을 안내한다', async ($, on) => {
+  mockSessionStart(on, 'drop')
+  on('command.run', { command: 'drop' }, () => ({ text: '다른 도구의 명령' }))
+  let filled = ''
+  on('prompt.fill', (_, e) => {
+    filled = e.text
+    return { isFilled: true }
+  })
+
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  await seeded($)
+  const ui = await mountTrail($)
+  expect(await ui.find({ type: 'Text', text: '/trail drop 1' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: '/trail drop all' })).toBeDefined()
+  await ui.press({ key: 'drop-all' })
+  expect(filled).toBe('/trail drop all')
+
+  expect((await run($, 'drop', 'all')).text).toBe('다른 도구의 명령')
+  expect((await run($, 'recall', '1.1')).text).toContain('본문-가')
+  expect((await run($, 'trail', 'drop all')).text).toContain('전부 지웠습니다')
+  expect((await run($, 'recall', '1')).text).toContain('주제가 없습니다')
+})
+
+test('새 세션에서는 지난 주제를 명시적으로 고르기 전까지 현재 주제가 없다', async ($, on) => {
+  mock.store(on, { trails: {
+    on: true, current: '1a', nextNo: 2, collapsed: [], kept: [],
+    byTopic: {
+      '1': topic(1, { sessionId: 'old' }),
+      '1a': topic(1, { id: '1a', sessionId: CURRENT_SESSION, parent: { id: '1', at: 0 } }),
+    },
+  } })
+  mockSessionStart(on)
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+
+  expect((await run($, 'drop')).text).toContain('아직 들고 있는 주제가 없습니다')
+  expect((await $.tool.call({ tool: TOOL, action: 'focus', index: 2 })).text).toBe('목차가 없다')
+  expect((await $.tool.call({ tool: TOOL, action: 'push', label: '새 곁가지' })).text).toBe('목차가 없다')
+
+  expect((await run($, 'recall', '1a.1')).text).toContain('1. 가')
+  expect((await $.tool.call({ tool: TOOL, action: 'focus', index: 2 })).text).toContain('2번으로')
+  expect((await $.tool.call({ tool: TOOL, action: 'push', label: '새 곁가지' })).text).toContain('곁가지 열림')
+  expect((await run($, 'drop')).text).toContain('1aa. 새 곁가지')
+})
+
+test('같은 세션을 다시 열면 현재 곁가지와 항목을 복원한다', async ($, on) => {
+  mock.store(on, { trails: {
+    on: true, current: '1a', nextNo: 2, collapsed: [], kept: [],
+    byTopic: {
+      '1': topic(1, { sessionId: CURRENT_SESSION }),
+      '1a': topic(1, { id: '1a', parent: { id: '1', at: 0 }, cursor: 1 }),
+    },
+  } })
+  mockSessionStart(on)
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+
+  expect((await run($, 'recall')).text).toContain('2. 나')
+  expect((await run($, 'trail', 'drop')).text).toContain('1a.')
+})
+
+test('/trail drop 은 지운 주제와 같은 세션의 남은 주제로 이동한다', async ($, on) => {
+  mock.store(on, { trails: {
+    on: true, current: '', nextNo: 2, collapsed: [], kept: [],
+    byTopic: { '1': topic(1, { title: '이전 세션 주제', sessionId: 'old' }) },
+  } })
+  mockSessionStart(on)
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: TOOL, action: 'set', title: '첫 주제', items: ['가'] })
+  await $.tool.call({ tool: TOOL, action: 'set', title: '둘째 주제', items: ['나'] })
+
+  expect((await run($, 'trail', 'drop')).text).toBe('3. 둘째 주제 — 지웠습니다.')
+  expect((await run($, 'trail', 'drop')).text).toBe('2. 첫 주제 — 지웠습니다.')
+  expect((await run($, 'trail', 'drop')).text).toContain('아직 들고 있는 주제가 없습니다')
+  expect((await run($, 'recall', '1.1')).text).toContain('이전 세션 주제')
+})
+
+test('Learning Trail에서 이전 세션은 접히고 오래된 주제는 안내 아래에만 나온다', async ($, on) => {
+  const now = Date.now()
+  mock.store(on, { trails: {
+    on: true, current: '1', nextNo: 4, collapsed: [], kept: [],
+    byTopic: {
+      '1': topic(1, { title: '이전 세션 주제', sessionId: 'old', createdAt: now, touchedAt: now }),
+      '2': topic(2, { title: '세션 정보 없는 주제', touchedAt: now }),
+      '3': topic(3, { title: '오래된 주제', sessionId: 'old', createdAt: now - 8 * DAY, touchedAt: now - 8 * DAY }),
+    },
+  } })
+  mockSessionStart(on)
+  on('ui.open', { id: 'learn-trail' }, (_, e) => {
+    expect(e.title).toBe('Learning Trail')
+    return { value: { isPlaced: true } }
+  })
+  let filled = ''
+  on('prompt.fill', (_, e) => {
+    filled = e.text
+    return { isFilled: true }
+  })
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  expect((await run($, 'trail')).text).toContain('Learning Trail')
+  const ui = await mountTrail($)
+  expect(await ui.find({ type: 'Text', text: '이 세션에 쌓인 목차가 없습니다.' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: '이전 세션 주제' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', text: '▸ 이전 기록 (1)' })).toBeDefined()
+
+  await $.tool.call({ tool: TOOL, action: 'set', title: '현재 세션 주제', items: ['하나'] })
+  const ordered = (await ui.findAll({ type: 'Button' })).map(row => row.text)
+  expect(ordered[0]).toContain('4. 현재 세션 주제')
+  expect(ordered.at(-2)).toContain('3. 오래된 주제')
+
+  const history = await ui.find({ type: 'Button', text: '▸ 이전 세션' })
+  await ui.press({ key: history?.key ?? '' })
+  expect(await ui.find({ type: 'Button', text: '1. 이전 세션 주제' })).toBeDefined()
+  expect(await ui.findAll({ type: 'Button', text: '3. 오래된 주제' })).toHaveLength(1)
+  await ui.press({ key: history?.key ?? '' })
+  expect((await run($, 'recall', '1.1')).text).toContain('이전 세션 주제')
+  expect(await ui.find({ type: 'Button', text: '1.1 가' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '/drop 1' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: '/drop all' })).toBeDefined()
+  await ui.press({ key: 'drop-all' })
+  expect(filled).toBe('/drop all')
+  expect((await run($, 'recall', '4.1')).text).toContain('현재 세션 주제')
+})
 
 test('/recall 주제번호 는 그 주제 전체를 보여 준다', async $ => {
   await seeded($)
@@ -591,6 +798,24 @@ test('/recall 1.1,3 · 1.2-3 은 고른 항목만 보여 준다', async $ => {
   const range = await run($, 'recall', '1.2-3')
   expect(range.text).toContain('2, 3번')
   expect(range.text).not.toContain('본문-가')
+
+  const spaced = await run($, 'recall', '1. 2-3')
+  expect(spaced.text).toContain('2, 3번')
+  expect(spaced.text).not.toContain('본문-가')
+})
+
+test('/recall 은 묶음과 주제 번호를 어느 순서로 적어도 같은 항목을 보여 준다', async $ => {
+  await seeded($)
+  await $.tool.call({ tool: TOOL, action: 'set', title: '다른 주제', items: ['라', '마', '바'] })
+
+  for (const args of ['1,3 2', '2 1,3']) {
+    await run($, 'recall', '1')
+    const result = await run($, 'recall', args)
+    expect(result.text).toContain('다른 주제 — 1, 3번')
+    expect(result.text).toContain('1. 라')
+    expect(result.text).toContain('3. 바')
+    expect(result.text).not.toContain('2. 마')
+  }
 })
 
 test('/recall 묶음에 없는 번호가 섞이면 무엇이 없는지 말한다', async $ => {
